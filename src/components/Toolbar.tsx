@@ -5,9 +5,12 @@ import ConfirmDialog from "./ConfirmDialog";
 
 export default function Toolbar() {
   const projectTitle = useAppStore((s) => s.project.title);
-  const canUndo = useAppStore((s) => s.history.past.length > 0);
-  const canRedo = useAppStore((s) => s.history.future.length > 0);
+  const canUndo = useAppStore((s) => s.history.position >= 0);
+  const canRedo = useAppStore(
+    (s) => s.history.position < s.history.entries.length - 1,
+  );
   const archiveCount = useAppStore((s) => s.project.markerArchive.length);
+  const historyPanelOpen = useAppStore((s) => s.historyPanelOpen);
   const tool = useAppStore((s) => s.tool);
   const [confirmNew, setConfirmNew] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -19,7 +22,7 @@ export default function Toolbar() {
       <button
         onClick={() => {
           const s = useAppStore.getState();
-          if (s.projectPath || s.history.past.length > 0) setConfirmNew(true);
+          if (s.projectPath || s.history.entries.length > 0) setConfirmNew(true);
           else s.newProject();
         }}
       >
@@ -42,6 +45,13 @@ export default function Toolbar() {
         title="Архив удалённых маркеров: просмотр и восстановление"
       >
         Архив ({archiveCount})
+      </button>
+      <button
+        className={historyPanelOpen ? "active" : undefined}
+        onClick={() => store.toggleHistoryPanel()}
+        title="Журнал изменений проекта"
+      >
+        История
       </button>
 
       <div className="sep" />

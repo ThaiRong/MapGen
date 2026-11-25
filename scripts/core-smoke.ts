@@ -7,6 +7,7 @@ import {
   renameMap,
   renameMarker,
   restoreMarker,
+  restoreMarkerEntity,
   setMapScale,
   setMapView,
   validateProject,
@@ -15,8 +16,24 @@ import {
   NEW_LOCATION_NAME,
 } from "../src/core/project";
 import { buildTree, getPathToRoot, getDescendantIds } from "../src/core/tree";
-import { commit, emptyHistory, redo, undo } from "../src/core/history";
-import { deserializeProject, serializeProject } from "../src/storage/json";
+import {
+  canRedo,
+  canUndo,
+  createHistory,
+  jumpTo,
+  makeEntry,
+  record,
+  redo,
+  toHistoryFile,
+  undo,
+  validateHistoryFile,
+} from "../src/core/history";
+import {
+  deserializeProject,
+  deserializeSave,
+  serializeProject,
+  serializeSave,
+} from "../src/storage/json";
 
 let passed = 0;
 function assert(cond: boolean, label: string) {
@@ -138,19 +155,62 @@ try {
   assert(e instanceof ValidationError, "битая ссылка маркера → ValidationError");
 }
 
-// 12. Undo/redo
-let history = emptyHistory();
-const before = project;
-history = commit(history, before);
-const after = renameMap(project, project.rootMapId, "Другой мир");
-const stepU = undo(history, after);
-assert(stepU.project === before, "undo возвращает прежний проект");
-const stepR = redo(stepU.history, after);
-assert(stepR.project === after, "redo возвращает новый проект");
-// Лимит истории
-let h2 = emptyHistory();
-for (let i = 0; i < 150; i += 1) h2 = commit(h2, before);
-assert(h2.past.length === 100, "история ограничена 100 шагами");
+// 12. Журнал изменений: записи, переходы, undo/redo, лимит
+const projectX = createProject("Журнал");
+let hist = createHistory(projectX);
+assert(hist.position === -1 && hist.entries.length === 0, "пустой журнал: позиция -1, записей нет");
+const emptyUndo = undo(hist);
+const emptyRedo = redo(hist);
+assert(emptyUndo === null && emptyRedo === null, "undo/redo на пустом журнале — null, не падение");
+
+const renamedX = renameMap(projectX, projectX.rootMapId, "Мир Журнала");
+hist = record(
+  hist,
+  makeEntry(
+    {
+      operationType: "map.renamed",
+      description: "Карта «Глобальная карта» переименована в «Мир Журнала»",
+      mapId: projectX.rootMapId,
+    },
+    renamedX,
+  ),
+);
+assert(hist.entries.length === 1 && hist.position === 0, "запись добавлена, позиция обновлена");
+assert(hist.entries[0].description.includes("Мир Журнала"), "человекочитаемое описание записи");
+assert(hist.entries[0].snapshot === renamedX, "снимок хранит состояние после действия");
+
+const stepBack = undo(hist);
+assert(stepBack !== null && stepBack.history.position === -1 && stepBack.project === projectX, "undo возвращает к базовому состоянию");
+const stepFwd = redo(stepBack!.history);
+assert(stepFwd !== null && stepFwd.history.position === 0 && stepFwd.project === renamedX, "redo возвращает вперёд");
+assert(canUndo(hist) && !canRedo(hist), "доступность undo/redo по позиции");
+
+// Лимит журнала: старые записи вытесняются, база сдвигается
+let hCap = createHistory(projectX);
+let twentieth: unknown = null;
+for (let i = 0; i < 120; i += 1) {
+  const snap = renameMap(projectX, projectX.rootMapId, `Итерация ${i}`);
+  const entry = makeEntry({ operationType: "map.renamed", description: `Шаг ${i}` }, snap);
+  if (i === 19) twentieth = snap;
+  hCap = record(hCap, entry);
+}
+assert(hCap.entries.length === 100, "журнал ограничен 100 записями");
+assert(hCap.position === 99, "позиция на последней записи");
+assert(hCap.base === twentieth, "база сдвинулась на состояние последней вытесненной записи");
+
+// Ветвление: запись после возврата назад перезаписывает будущую ветвь
+const secondX = renameMap(renamedX, renamedX.rootMapId, "Шаг 2");
+hist = record(hist, makeEntry({ operationType: "map.renamed", description: "Шаг 2" }, secondX));
+const backToFirst = jumpTo(hist, 0);
+assert(backToFirst.history.position === 0 && canRedo(backToFirst.history), "возврат назад: ветвь впереди доступна");
+const thirdX = renameMap(backToFirst.project, projectX.rootMapId, "Шаг 3");
+const afterRewrite = record(
+  backToFirst.history,
+  makeEntry({ operationType: "map.renamed", description: "Шаг 3" }, thirdX),
+);
+assert(afterRewrite.entries.length === 2 && afterRewrite.position === 1, "новая запись перезаписала отменённую ветвь");
+assert(afterRewrite.entries[1].description === "Шаг 3", "перезаписанная ветвь заменена новой записью");
+assert(!canRedo(afterRewrite), "после перезаписи redo недоступно");
 
 // 13. Архив удалённых маркеров: удаление сохраняет маркер
 let p = createProject("Архив");
@@ -215,24 +275,98 @@ try {
   );
 }
 
-// 17. Удаление и восстановление попадают в историю (снапшоты)
-let h3 = emptyHistory();
-h3 = commit(h3, beforeDelete);
-const afterDelete = deleteMarker(beforeDelete, beforeDelete.rootMapId, locA.entityId);
-const undoDelete = undo(h3, afterDelete);
+// 17. Удаление и восстановление двигают позицию журнала
+let hd = createHistory(beforeDelete);
+const delSnap = deleteMarker(beforeDelete, beforeDelete.rootMapId, locA.entityId);
+hd = record(
+  hd,
+  makeEntry(
+    { operationType: "marker.deleted", description: "Маркер «Новая локация» удалён", mapId: beforeDelete.rootMapId, entityId: locA.entityId },
+    delSnap,
+  ),
+);
+const undoDel = undo(hd);
 assert(
-  undoDelete.project!.markerArchive.length === 0 &&
-    undoDelete.project!.maps[undoDelete.project!.rootMapId].entities.length === 1,
+  undoDel !== null &&
+    undoDel.project.markerArchive.length === 0 &&
+    undoDel.project.maps[undoDel.project.rootMapId].entities.length === 1,
   "undo удаления возвращает маркер и очищает архив",
 );
-const h4 = commit(h3, afterDelete);
-const afterRestore = restoreMarker(afterDelete, locA.entityId).project;
-const undoRestore = undo(h4, afterRestore);
+const redoDel = redo(undoDel!.history);
 assert(
-  undoRestore.project!.markerArchive.length === 1 &&
-    undoRestore.project!.maps[undoRestore.project!.rootMapId].entities.length === 0,
-  "undo восстановления возвращает маркер в архив",
+  redoDel !== null &&
+    redoDel.project.markerArchive.length === 1 &&
+    redoDel.project.maps[redoDel.project.rootMapId].entities.length === 0,
+  "redo удаления возвращает маркер в архив",
 );
+
+// 19. restoreInfo в записи marker.deleted и восстановление из истории
+let pm = createProject("История маркеров");
+const locM = addLocation(pm, pm.rootMapId, 7, 8);
+pm = locM.project;
+const markerM = pm.maps[pm.rootMapId].entities[0];
+const afterDelM = deleteMarker(pm, pm.rootMapId, locM.entityId);
+const delEntry = makeEntry(
+  {
+    operationType: "marker.deleted",
+    description: `Маркер «${markerM.label}» удалён`,
+    mapId: pm.rootMapId,
+    entityId: locM.entityId,
+    restoreInfo: { sourceMapId: pm.rootMapId, entity: { ...markerM } },
+  },
+  afterDelM,
+);
+assert(delEntry.restoreInfo?.entity.x === 7 && delEntry.restoreInfo.entity.y === 8, "restoreInfo хранит прежние координаты");
+const fromHistory = restoreMarkerEntity(
+  afterDelM,
+  delEntry.restoreInfo!.sourceMapId,
+  delEntry.restoreInfo!.entity,
+);
+const reEntity = fromHistory.project.maps[fromHistory.project.rootMapId].entities.find(
+  (e) => e.id === locM.entityId,
+)!;
+assert(
+  reEntity.x === 7 && reEntity.y === 8 && reEntity.targetMapId === locM.mapId,
+  "восстановление из истории: прежние координаты и связь с картой",
+);
+try {
+  restoreMarkerEntity(fromHistory.project, pm.rootMapId, markerM);
+  assert(false, "повторное восстановление должно бросить ошибку");
+} catch {
+  assert(true, "дубликаты маркеров при восстановлении блокируются");
+}
+
+// 20. Журнал переживает сериализацию; повреждения не ломают загрузку
+const histFile = toHistoryFile(afterRewrite);
+const parsedHist = validateHistoryFile(JSON.parse(JSON.stringify(histFile)), projectX);
+assert(
+  parsedHist !== null &&
+    parsedHist.entries.length === afterRewrite.entries.length &&
+    parsedHist.position === afterRewrite.position,
+  "журнал переживает сериализацию",
+);
+const corrupt = JSON.parse(JSON.stringify(histFile));
+corrupt.entries[0] = { broken: true };
+const parsedCorrupt = validateHistoryFile(corrupt, projectX);
+assert(
+  parsedCorrupt !== null && parsedCorrupt.entries.length === afterRewrite.entries.length - 1,
+  "повреждённая запись отбрасывается без падения",
+);
+const farPos = JSON.parse(JSON.stringify(histFile));
+farPos.position = 999;
+const parsedFar = validateHistoryFile(farPos, projectX);
+assert(parsedFar !== null && parsedFar.position === parsedFar.entries.length - 1, "позиция прижата к диапазону");
+assert(validateHistoryFile("garbage", projectX) === null, "мусорная история → null");
+assert(validateHistoryFile(undefined, projectX) === null, "отсутствующая история → null");
+
+// 21. Файл .mapkg: история сохраняется вместе с проектом
+const saveText = serializeSave(projectX, afterRewrite);
+const loaded = deserializeSave(saveText);
+assert(loaded.history !== null && loaded.history.entries.length === afterRewrite.entries.length, "история загружена из файла");
+assert(!("history" in loaded.project), "у проекта нет поля history после загрузки");
+const legacyNoHistory = JSON.parse(serializeProject(projectX)) as Record<string, unknown>;
+const loadedLegacy = deserializeSave(JSON.stringify(legacyNoHistory));
+assert(loadedLegacy.history === null, "старый файл без истории загружается (history = null)");
 
 // 18. Сериализация сохраняет архив; старые файлы без архива читаются
 const text2 = serializeProject(p);

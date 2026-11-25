@@ -1,42 +1,250 @@
-import type { Project } from "./types";
+import type { EntityId, LocationLinkEntity, MapId, Project } from "./types";
+import { validateProject } from "./project";
 
-export interface History {
-  past: Project[];
-  future: Project[];
+export type OperationType =
+  | "project.created"
+  | "project.loaded"
+  | "project.saved"
+  | "map.created"
+  | "map.renamed"
+  | "map.deleted"
+  | "map.scale"
+  | "marker.created"
+  | "marker.renamed"
+  | "marker.moved"
+  | "marker.deleted"
+  | "marker.restored";
+
+/** Данные для восстановления удалённого маркера прямо из записи истории. */
+export interface HistoryRestoreInfo {
+  sourceMapId: MapId;
+  entity: LocationLinkEntity;
+}
+
+/**
+ * Одна запись журнала: что случилось, когда и в каком состоянии
+ * оказался проект после этого. Переход к записи = переход проекта
+ * к её снимку (как панель History в Photoshop).
+ */
+export interface HistoryEntry {
+  id: string;
+  timestamp: string;
+  operationType: OperationType;
+  description: string;
+  mapId: MapId | null;
+  entityId: EntityId | null;
+  snapshot: Project;
+  restoreInfo?: HistoryRestoreInfo;
+}
+
+/**
+ * Линейный журнал с текущей позицией.
+ * position = индекс применённой записи; -1 означает базовое состояние
+ * (проект до первой записи). Записи после position — отменённая
+ * ветвь, которую следующее действие перезапишет.
+ */
+export interface ProjectHistory {
+  base: Project;
+  entries: HistoryEntry[];
+  position: number;
 }
 
 export const HISTORY_LIMIT = 100;
 
-export function emptyHistory(): History {
-  return { past: [], future: [] };
+export function createHistory(base: Project): ProjectHistory {
+  return { base, entries: [], position: -1 };
 }
 
-export function commit(history: History, project: Project): History {
+export interface EntryInput {
+  operationType: OperationType;
+  description: string;
+  mapId?: MapId | null;
+  entityId?: EntityId | null;
+  restoreInfo?: HistoryRestoreInfo;
+}
+
+export function makeEntry(input: EntryInput, snapshot: Project): HistoryEntry {
   return {
-    past: [...history.past.slice(-(HISTORY_LIMIT - 1)), project],
-    future: [],
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    operationType: input.operationType,
+    description: input.description,
+    mapId: input.mapId ?? null,
+    entityId: input.entityId ?? null,
+    snapshot,
+    ...(input.restoreInfo ? { restoreInfo: input.restoreInfo } : null),
   };
+}
+
+/**
+ * Добавляет запись в журнал. Отменённая ветвь (записи после position)
+ * отсекается. При превышении HISTORY_LIMIT самые старые записи
+ * вытесняются — базовым становится состояние на момент последней
+ * вытесненной записи, поэтому глубина отката ограничена, а файл
+ * проекта не раздувается бесконечно.
+ */
+export function record(history: ProjectHistory, entry: HistoryEntry): ProjectHistory {
+  const kept = history.entries.slice(0, history.position + 1);
+  let entries = [...kept, entry];
+  let base = history.base;
+  if (entries.length > HISTORY_LIMIT) {
+    const overflow = entries.length - HISTORY_LIMIT;
+    base = entries[overflow - 1].snapshot;
+    entries = entries.slice(overflow);
+  }
+  return { base, entries, position: entries.length - 1 };
+}
+
+export function canUndo(history: ProjectHistory): boolean {
+  return history.position >= 0;
+}
+
+export function canRedo(history: ProjectHistory): boolean {
+  return history.position < history.entries.length - 1;
 }
 
 export interface HistoryStep {
-  history: History;
-  project: Project | null;
+  history: ProjectHistory;
+  project: Project;
 }
 
-export function undo(history: History, current: Project): HistoryStep {
-  if (history.past.length === 0) return { history, project: null };
-  const previous = history.past[history.past.length - 1];
+/**
+ * Перемещает позицию журнала. Индекс -1 — базовое состояние.
+ * Индексы за пределами диапазона прижимаются к границам.
+ */
+export function jumpTo(history: ProjectHistory, index: number): HistoryStep {
+  const clamped = Math.max(-1, Math.min(index, history.entries.length - 1));
+  const project = clamped < 0 ? history.base : history.entries[clamped].snapshot;
+  return { history: { ...history, position: clamped }, project };
+}
+
+export function undo(history: ProjectHistory): HistoryStep | null {
+  if (!canUndo(history)) return null;
+  return jumpTo(history, history.position - 1);
+}
+
+export function redo(history: ProjectHistory): HistoryStep | null {
+  if (!canRedo(history)) return null;
+  return jumpTo(history, history.position + 1);
+}
+
+/* ---------- Сохранение в файл проекта ---------- */
+
+export const HISTORY_FILE_FORMAT = "mapgen-history";
+export const HISTORY_FILE_VERSION = 1;
+
+interface HistoryFile {
+  format: typeof HISTORY_FILE_FORMAT;
+  version: typeof HISTORY_FILE_VERSION;
+  base: Project;
+  entries: HistoryEntry[];
+  position: number;
+}
+
+export function toHistoryFile(history: ProjectHistory): HistoryFile {
   return {
-    history: { past: history.past.slice(0, -1), future: [current, ...history.future] },
-    project: previous,
+    format: HISTORY_FILE_FORMAT,
+    version: HISTORY_FILE_VERSION,
+    base: history.base,
+    entries: history.entries,
+    position: history.position,
   };
 }
 
-export function redo(history: History, current: Project): HistoryStep {
-  if (history.future.length === 0) return { history, project: null };
-  const next = history.future[0];
-  return {
-    history: { past: [...history.past, current], future: history.future.slice(1) },
-    project: next,
-  };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const OPERATION_TYPES = new Set<string>([
+  "project.created",
+  "project.loaded",
+  "project.saved",
+  "map.created",
+  "map.renamed",
+  "map.deleted",
+  "map.scale",
+  "marker.created",
+  "marker.renamed",
+  "marker.moved",
+  "marker.deleted",
+  "marker.restored",
+]);
+
+function isIsoDate(value: unknown): boolean {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function tryValidateEntry(raw: unknown): HistoryEntry | null {
+  try {
+    if (!isRecord(raw)) return null;
+    if (typeof raw.id !== "string" || !raw.id) return null;
+    const timestamp = raw.timestamp;
+    if (typeof timestamp !== "string" || !isIsoDate(timestamp)) return null;
+    if (typeof raw.operationType !== "string" || !OPERATION_TYPES.has(raw.operationType)) {
+      return null;
+    }
+    if (typeof raw.description !== "string") return null;
+    if (raw.mapId !== null && typeof raw.mapId !== "string") return null;
+    if (raw.entityId !== null && typeof raw.entityId !== "string") return null;
+    // Снимок записи должен быть валидным проектом; иначе запись бесполезна.
+    const snapshot = validateProject(raw.snapshot);
+    let restoreInfo: HistoryRestoreInfo | undefined;
+    if (raw.restoreInfo !== undefined) {
+      const ri = raw.restoreInfo;
+      if (!isRecord(ri)) return null;
+      if (typeof ri.sourceMapId !== "string" || !ri.sourceMapId) return null;
+      const re = ri.entity;
+      if (!isRecord(re)) return null;
+      if (re.kind !== "location-link") return null;
+      if (typeof re.id !== "string" || typeof re.x !== "number" || typeof re.y !== "number") {
+        return null;
+      }
+      if (typeof re.label !== "string" || typeof re.targetMapId !== "string") return null;
+      restoreInfo = { sourceMapId: ri.sourceMapId, entity: re as unknown as LocationLinkEntity };
+    }
+    return {
+      id: raw.id,
+      timestamp,
+      operationType: raw.operationType as OperationType,
+      description: raw.description,
+      mapId: (raw.mapId as MapId | null) ?? null,
+      entityId: (raw.entityId as EntityId | null) ?? null,
+      snapshot,
+      ...(restoreInfo ? { restoreInfo } : null),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Разбирает историю из файла проекта. Толерантна: повреждённая
+ * история никогда не ломает загрузку — возвращается null, и вызывающий
+ * код начинает журнал заново, сохраняя архив удалённых маркеров
+ * (он живёт в проекте, а не в истории).
+ */
+export function validateHistoryFile(raw: unknown, fallbackBase: Project): ProjectHistory | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isRecord(raw)) return null;
+  if (raw.format !== HISTORY_FILE_FORMAT) return null;
+  if (raw.version !== HISTORY_FILE_VERSION) return null;
+
+  let base: Project;
+  try {
+    base = validateProject(raw.base);
+  } catch {
+    base = fallbackBase;
+  }
+
+  if (!Array.isArray(raw.entries)) return null;
+  const entries: HistoryEntry[] = [];
+  for (const rawEntry of raw.entries) {
+    const entry = tryValidateEntry(rawEntry);
+    if (entry) entries.push(entry);
+  }
+
+  let position = typeof raw.position === "number" ? Math.floor(raw.position) : entries.length - 1;
+  position = Math.max(-1, Math.min(position, entries.length - 1));
+
+  return { base, entries, position };
 }

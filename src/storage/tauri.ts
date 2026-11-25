@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import type { ProjectHistory } from "../core/history";
 import type { Project } from "../core/types";
-import { deserializeProject, serializeProject } from "./json";
+import { deserializeSave, serializeSave } from "./json";
 import { ProjectStorage, LoadedProject, UserCancelledError } from "./interface";
 
 const FILE_FILTER = {
@@ -10,7 +11,7 @@ const FILE_FILTER = {
 };
 
 export class TauriStorage implements ProjectStorage {
-  async saveToFile(project: Project, path?: string): Promise<string> {
+  async saveToFile(project: Project, history: ProjectHistory, path?: string): Promise<string> {
     let target: string | null | undefined = path;
     if (!target) {
       target = await save({
@@ -20,7 +21,7 @@ export class TauriStorage implements ProjectStorage {
       });
       if (!target) throw new UserCancelledError();
     }
-    await invoke("save_project", { path: target, contents: serializeProject(project) });
+    await invoke("save_project", { path: target, contents: serializeSave(project, history) });
     return target;
   }
 
@@ -35,17 +36,18 @@ export class TauriStorage implements ProjectStorage {
       if (!target) throw new UserCancelledError();
     }
     const contents = await invoke<string>("load_project", { path: target });
-    return { project: deserializeProject(contents), path: target };
+    return { ...deserializeSave(contents), path: target };
   }
 
-  async saveAutosave(project: Project): Promise<void> {
-    await invoke("save_autosave", { contents: serializeProject(project) });
+  async saveAutosave(project: Project, history: ProjectHistory): Promise<void> {
+    await invoke("save_autosave", { contents: serializeSave(project, history) });
   }
 
-  async loadAutosave(): Promise<Project | null> {
+  async loadAutosave(): Promise<LoadedProject | null> {
     const contents = await invoke<string | null>("load_autosave");
     if (contents === null) return null;
-    return deserializeProject(contents);
+    const parsed = deserializeSave(contents);
+    return { ...parsed, path: "" };
   }
 }
 

@@ -211,45 +211,62 @@ export interface RestoreMarkerResult {
 }
 
 /**
- * Восстанавливает маркер из архива: возвращает прежние координаты
- * и вновь связывает с целевой картой. Бросает Error с понятным
- * сообщением, если восстановить невозможно.
+ * Вставляет маркер обратно на карту-источник: прежние координаты
+ * и связь с целевой картой. Используется и архивом удалённых
+ * маркеров (1.5.1), и восстановлением из записи истории (1.5.2).
+ * Бросает Error с понятным сообщением, если восстановить невозможно;
+ * проект при этом не изменяется.
  */
-export function restoreMarker(project: Project, archivedEntityId: EntityId): RestoreMarkerResult {
-  const index = project.markerArchive.findIndex((a) => a.entity.id === archivedEntityId);
-  if (index < 0) throw new Error("Маркер не найден в архиве");
-  const entry = project.markerArchive[index];
-
-  const source = project.maps[entry.sourceMapId];
+export function restoreMarkerEntity(
+  project: Project,
+  sourceMapId: MapId,
+  entity: LocationLinkEntity,
+): RestoreMarkerResult {
+  const source = project.maps[sourceMapId];
   if (!source) {
     throw new Error("Нельзя восстановить: карта, на которой стоял маркер, удалена из проекта");
   }
-  if (!project.maps[entry.entity.targetMapId]) {
-    throw new Error(
-      `Нельзя восстановить «${entry.entity.label}»: связанная карта удалена из проекта`,
-    );
+  if (!project.maps[entity.targetMapId]) {
+    throw new Error(`Нельзя восстановить «${entity.label}»: связанная карта удалена из проекта`);
   }
-  if (source.entities.some((e) => e.id === entry.entity.id)) {
+  if (source.entities.some((e) => e.id === entity.id)) {
     throw new Error("Такой маркер уже существует на карте");
   }
 
   const ts = now();
-  const restored: LocationLinkEntity = { ...entry.entity, updatedAt: ts };
+  const restored: LocationLinkEntity = { ...entity, updatedAt: ts };
   return {
     project: touch({
       ...project,
-      markerArchive: project.markerArchive.filter((_, i) => i !== index),
       maps: {
         ...project.maps,
-        [entry.sourceMapId]: {
+        [sourceMapId]: {
           ...source,
           updatedAt: ts,
           entities: [...source.entities, restored],
         },
       },
     }),
-    mapId: entry.sourceMapId,
+    mapId: sourceMapId,
     entityId: restored.id,
+  };
+}
+
+/**
+ * Восстанавливает маркер из архива удалённых маркеров (1.5.1).
+ */
+export function restoreMarker(project: Project, archivedEntityId: EntityId): RestoreMarkerResult {
+  const index = project.markerArchive.findIndex((a) => a.entity.id === archivedEntityId);
+  if (index < 0) throw new Error("Маркер не найден в архиве");
+  const entry = project.markerArchive[index];
+
+  const result = restoreMarkerEntity(project, entry.sourceMapId, entry.entity);
+  return {
+    ...result,
+    project: touch({
+      ...result.project,
+      markerArchive: result.project.markerArchive.filter((_, i) => i !== index),
+    }),
   };
 }
 

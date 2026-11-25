@@ -5,15 +5,26 @@ import {
   deleteMap,
   deleteMarker,
   moveMarker,
+  NEW_LOCATION_NAME,
   renameMap,
   renameMarker,
   renameProject,
   restoreMarker,
+  restoreMarkerEntity,
   setMapScale,
   setMapView,
   ValidationError,
 } from "../core/project";
-import { commit, emptyHistory, redo, undo, type History } from "../core/history";
+import {
+  createHistory,
+  jumpTo,
+  makeEntry,
+  record,
+  redo,
+  undo,
+  type EntryInput,
+  type ProjectHistory,
+} from "../core/history";
 import type { EntityId, LocationLinkEntity, MapId, MapScale, MapView, Project } from "../core/types";
 import { UserCancelledError } from "../storage/interface";
 import { createStorage } from "../storage/tauri";
@@ -22,7 +33,11 @@ export type Tool = "select" | "add-location";
 
 const storage = createStorage();
 
-function sanitize(project: Project, activeMapId: MapId, selectedEntityId: EntityId | null) {
+function sanitize(
+  project: Project,
+  activeMapId: MapId,
+  selectedEntityId: EntityId | null,
+) {
   const active = project.maps[activeMapId] ? activeMapId : project.rootMapId;
   let selected = selectedEntityId;
   if (selected) {
@@ -32,13 +47,24 @@ function sanitize(project: Project, activeMapId: MapId, selectedEntityId: Entity
   return { activeMapId: active, selectedEntityId: selected };
 }
 
+function positionDescription(history: ProjectHistory): string {
+  if (history.position < 0) return "начало проекта";
+  return history.entries[history.position]?.description ?? "";
+}
+
 export interface AppState {
   project: Project;
   projectPath: string | null;
   activeMapId: MapId;
   selectedEntityId: EntityId | null;
   tool: Tool;
-  history: History;
+  history: ProjectHistory;
+  /** Панель журнала изменений (1.5.2). */
+  historyPanelOpen: boolean;
+  /** Открытый диалог подтверждения перезаписи отменённой ветви. */
+  branchConfirm: { futureCount: number } | null;
+  /** Действие, ожидающее подтверждения перезаписи ветви истории. */
+  pendingMutation: (() => void) | null;
   status: string;
   cursor: { x: number; y: number } | null;
   viewZoom: number;
@@ -46,6 +72,7 @@ export interface AppState {
   setStatus: (status: string) => void;
   setCursor: (cursor: { x: number; y: number } | null) => void;
   setViewZoom: (zoom: number) => void;
+  toggleHistoryPanel: () => void;
   setTool: (tool: Tool) => void;
   selectEntity: (id: EntityId | null) => void;
   openMap: (id: MapId) => void;
@@ -57,32 +84,79 @@ export interface AppState {
   renameSelectedMarker: (label: string) => void;
   deleteSelectedMarker: () => void;
   restoreArchivedMarker: (archivedEntityId: EntityId) => void;
+  restoreMarkerFromHistory: (entryId: string) => void;
   deleteMapById: (mapId: MapId) => void;
   setScale: (mapId: MapId, scale: MapScale | undefined) => void;
   setView: (mapId: MapId, view: MapView) => void;
   renameProjectTitle: (title: string) => void;
   undoChange: () => void;
   redoChange: () => void;
+  jumpToHistory: (index: number) => void;
+  resolveBranchOverwrite: (accept: boolean) => void;
   saveProjectAs: () => Promise<void>;
   saveProject: () => Promise<void>;
   openProject: () => Promise<void>;
 }
 
 export const useAppStore = create<AppState>()((set, get) => {
-  /** Применяет новую версию проекта с записью в историю отмен. */
-  const apply = (next: Project, status?: string) => {
+  /** Применяет новое состояние проекта и пишет запись в журнал. */
+  const applyNow = (next: Project, meta: EntryInput, status?: string) => {
     const { project, activeMapId, selectedEntityId, history } = get();
     if (next === project) return;
-    const clean = sanitize(next, activeMapId, selectedEntityId);
+    const entry = makeEntry(meta, next);
+    const newHistory = record(history, entry);
     set({
       project: next,
-      history: commit(history, project),
-      ...clean,
+      history: newHistory,
+      ...sanitize(next, activeMapId, selectedEntityId),
       ...(status !== undefined ? { status } : null),
     });
   };
 
+  /**
+   * Действие, не меняющее проект, но значимое для журнала
+   * (сохранение проекта). Запись получает снимок текущего состояния.
+   */
+  const recordOnly = (meta: EntryInput, status?: string) => {
+    const { project, history } = get();
+    const entry = makeEntry(meta, project);
+    set({
+      history: record(history, entry),
+      ...(status !== undefined ? { status } : null),
+    });
+  };
+
+  /**
+   * Если пользователь вернулся назад по истории, будущая ветвь ещё
+   * существует — новое действие перезапишет её. Спрашиваем подтверждение,
+   * чтобы не терять отменённые изменения молча.
+   */
+  const withBranchGuard = (action: () => void) => {
+    const { history } = get();
+    const futureCount = history.entries.length - 1 - history.position;
+    if (futureCount <= 0) {
+      action();
+      return;
+    }
+    set({
+      branchConfirm: { futureCount },
+      pendingMutation: action,
+    });
+  };
+
+  const apply = (next: Project, meta: EntryInput, status?: string) => {
+    if (next === get().project) return;
+    withBranchGuard(() => applyNow(next, meta, status));
+  };
+
   const initialProject = createProject();
+  const initialHistory = record(
+    createHistory(initialProject),
+    makeEntry(
+      { operationType: "project.created", description: `Проект «${initialProject.title}» создан` },
+      initialProject,
+    ),
+  );
 
   return {
     project: initialProject,
@@ -90,7 +164,10 @@ export const useAppStore = create<AppState>()((set, get) => {
     activeMapId: initialProject.rootMapId,
     selectedEntityId: null,
     tool: "select",
-    history: emptyHistory(),
+    history: initialHistory,
+    historyPanelOpen: false,
+    branchConfirm: null,
+    pendingMutation: null,
     status: "Готов к работе",
     cursor: null,
     viewZoom: 1,
@@ -100,6 +177,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     setViewZoom: (zoom) => {
       if (get().viewZoom !== zoom) set({ viewZoom: zoom });
     },
+    toggleHistoryPanel: () => set({ historyPanelOpen: !get().historyPanelOpen }),
 
     setTool: (tool) => {
       set({ tool });
@@ -122,13 +200,21 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     newProject: () => {
       const project = createProject();
+      const history = record(
+        createHistory(project),
+        makeEntry(
+          { operationType: "project.created", description: `Проект «${project.title}» создан` },
+          project,
+        ),
+      );
       set({
         project,
         projectPath: null,
         activeMapId: project.rootMapId,
         selectedEntityId: null,
         tool: "select",
-        history: emptyHistory(),
+        history,
+        branchConfirm: null,
         status: "Создан новый проект",
       });
     },
@@ -136,38 +222,86 @@ export const useAppStore = create<AppState>()((set, get) => {
     addLocationAt: (x, y) => {
       const { project, activeMapId } = get();
       const result = addLocation(project, activeMapId, x, y);
-      const { history } = get();
-      set({
-        project: result.project,
-        history: commit(history, project),
-        selectedEntityId: result.entityId,
-        tool: "select",
-        status: "Локация создана. Двойной клик по маркеру — вход внутрь",
+      if (result.project === project) return;
+      withBranchGuard(() => {
+        applyNow(
+          result.project,
+          {
+            operationType: "marker.created",
+            description: `Создана локация «${NEW_LOCATION_NAME}»`,
+            mapId: activeMapId,
+            entityId: result.entityId,
+          },
+          "Локация создана. Двойной клик по маркеру — вход внутрь",
+        );
+        set({ selectedEntityId: result.entityId, tool: "select" });
       });
     },
 
     moveMarker: (entityId, x, y) => {
       const { project, activeMapId } = get();
-      apply(moveMarker(project, activeMapId, entityId, x, y));
+      const map = project.maps[activeMapId];
+      const entity = map?.entities.find((e) => e.id === entityId);
+      if (!entity) return;
+      apply(
+        moveMarker(project, activeMapId, entityId, x, y),
+        {
+          operationType: "marker.moved",
+          description: `Маркер «${entity.label}» перемещён`,
+          mapId: activeMapId,
+          entityId,
+        },
+      );
     },
 
     renameMapById: (mapId, name) => {
       const { project } = get();
-      apply(renameMap(project, mapId, name), "Карта переименована");
+      const map = project.maps[mapId];
+      if (!map) return;
+      apply(
+        renameMap(project, mapId, name),
+        {
+          operationType: "map.renamed",
+          description: `Карта «${map.name}» переименована в «${name.trim() || map.name}»`,
+          mapId,
+        },
+        "Карта переименована",
+      );
     },
 
     renameSelectedMarker: (label) => {
       const { project, activeMapId, selectedEntityId } = get();
       if (!selectedEntityId) return;
-      apply(renameMarker(project, activeMapId, selectedEntityId, label));
+      const map = project.maps[activeMapId];
+      const entity = map?.entities.find((e) => e.id === selectedEntityId);
+      if (!entity) return;
+      apply(
+        renameMarker(project, activeMapId, selectedEntityId, label),
+        {
+          operationType: "marker.renamed",
+          description: `Маркер «${entity.label}» переименован в «${label.trim() || entity.label}»`,
+          mapId: activeMapId,
+          entityId: selectedEntityId,
+        },
+      );
     },
 
     deleteSelectedMarker: () => {
       const { project, activeMapId, selectedEntityId } = get();
       if (!selectedEntityId) return;
+      const map = project.maps[activeMapId];
+      const entity = map?.entities.find((e) => e.id === selectedEntityId);
+      if (!entity) return;
       set({ selectedEntityId: null });
       apply(
         deleteMarker(project, activeMapId, selectedEntityId),
+        {
+          operationType: "marker.deleted",
+          description: `Маркер «${entity.label}» удалён`,
+          mapId: activeMapId,
+          entityId: selectedEntityId,
+          restoreInfo: { sourceMapId: activeMapId, entity: { ...entity } },
+        },
         "Маркер удалён в архив. Карта осталась в дереве; восстановление — кнопка «Архив»",
       );
     },
@@ -175,9 +309,55 @@ export const useAppStore = create<AppState>()((set, get) => {
     restoreArchivedMarker: (archivedEntityId) => {
       const { project, activeMapId } = get();
       try {
+        const archived = project.markerArchive.find((a) => a.entity.id === archivedEntityId);
         const result = restoreMarker(project, archivedEntityId);
-        apply(result.project, "Маркер восстановлен на прежнем месте");
-        if (result.mapId === activeMapId) set({ selectedEntityId: result.entityId });
+        const label = archived?.entity.label ?? "";
+        const mapId = result.mapId;
+        const entityId = result.entityId;
+        withBranchGuard(() => {
+          applyNow(
+            result.project,
+            {
+              operationType: "marker.restored",
+              description: `Маркер «${label}» восстановлен`,
+              mapId,
+              entityId,
+            },
+            "Маркер восстановлен на прежнем месте",
+          );
+          if (mapId === activeMapId) set({ selectedEntityId: entityId });
+        });
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось восстановить маркер" });
+      }
+    },
+
+    restoreMarkerFromHistory: (entryId) => {
+      const { project, activeMapId, history } = get();
+      const entry = history.entries.find((e) => e.id === entryId);
+      const info = entry?.restoreInfo;
+      if (!info) {
+        set({ status: "Запись не позволяет восстановить маркер" });
+        return;
+      }
+      try {
+        const result = restoreMarkerEntity(project, info.sourceMapId, info.entity);
+        const mapId = info.sourceMapId;
+        const entityId = info.entity.id;
+        const label = info.entity.label;
+        withBranchGuard(() => {
+          applyNow(
+            result.project,
+            {
+              operationType: "marker.restored",
+              description: `Маркер «${label}» восстановлен`,
+              mapId,
+              entityId,
+            },
+            `Маркер «${label}» восстановлен из истории`,
+          );
+          if (mapId === activeMapId) set({ selectedEntityId: entityId });
+        });
       } catch (e) {
         set({ status: e instanceof Error ? e.message : "Не удалось восстановить маркер" });
       }
@@ -185,8 +365,14 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     deleteMapById: (mapId) => {
       const { project } = get();
+      const map = project.maps[mapId];
+      if (!map) return;
       try {
-        apply(deleteMap(project, mapId), "Карта удалена");
+        apply(
+          deleteMap(project, mapId),
+          { operationType: "map.deleted", description: `Карта «${map.name}» удалена`, mapId },
+          "Карта удалена",
+        );
       } catch (e) {
         set({ status: e instanceof Error ? e.message : "Не удалось удалить карту" });
       }
@@ -194,10 +380,20 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     setScale: (mapId, scale) => {
       const { project } = get();
-      apply(setMapScale(project, mapId, scale), "Масштаб обновлён");
+      const map = project.maps[mapId];
+      if (!map) return;
+      apply(
+        setMapScale(project, mapId, scale),
+        {
+          operationType: "map.scale",
+          description: `Масштаб карты «${map.name}» обновлён`,
+          mapId,
+        },
+        "Масштаб обновлён",
+      );
     },
 
-    // Вид — навигация: в историю не пишем.
+    // Вид — навигация: в журнал не пишем.
     setView: (mapId, view) => {
       const { project } = get();
       const next = setMapView(project, mapId, view);
@@ -214,39 +410,73 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     undoChange: () => {
       const { project, history, activeMapId, selectedEntityId } = get();
-      const step = undo(history, project);
-      if (!step.project) {
+      const step = undo(history);
+      if (!step) {
         set({ status: "Отменять нечего" });
         return;
       }
+      if (step.project === project) return;
       set({
         project: step.project,
         history: step.history,
         ...sanitize(step.project, activeMapId, selectedEntityId),
-        status: "Отменено",
+        status: `Отменено. Текущая запись: ${positionDescription(step.history)}`,
       });
     },
 
     redoChange: () => {
       const { project, history, activeMapId, selectedEntityId } = get();
-      const step = redo(history, project);
-      if (!step.project) {
+      const step = redo(history);
+      if (!step) {
         set({ status: "Повторять нечего" });
+        return;
+      }
+      if (step.project === project) return;
+      set({
+        project: step.project,
+        history: step.history,
+        ...sanitize(step.project, activeMapId, selectedEntityId),
+        status: `Повторено. Текущая запись: ${positionDescription(step.history)}`,
+      });
+    },
+
+    jumpToHistory: (index) => {
+      const { project, history, activeMapId, selectedEntityId } = get();
+      if (index === history.position) return;
+      const step = jumpTo(history, index);
+      if (step.project === project) {
+        set({ history: step.history });
         return;
       }
       set({
         project: step.project,
         history: step.history,
         ...sanitize(step.project, activeMapId, selectedEntityId),
-        status: "Повторено",
+        status: `Текущая запись: ${positionDescription(step.history)}`,
       });
     },
 
+    resolveBranchOverwrite: (accept) => {
+      const pending = get().pendingMutation;
+      set({ branchConfirm: null, pendingMutation: null });
+      if (accept && pending) {
+        pending();
+      } else if (!accept) {
+        set({ status: "Действие отменено — отменённая ветвь истории сохранена" });
+      }
+    },
+
     saveProjectAs: async () => {
-      const { project } = get();
+      const { project, history } = get();
       try {
-        const path = await storage.saveToFile(project);
-        set({ projectPath: path, status: `Сохранено: ${path}` });
+        const path = await storage.saveToFile(project, history);
+        set({ projectPath: path });
+        withBranchGuard(() => {
+          recordOnly(
+            { operationType: "project.saved", description: `Проект «${project.title}» сохранён` },
+            `Сохранено: ${path}`,
+          );
+        });
       } catch (e) {
         if (e instanceof UserCancelledError) return;
         set({ status: e instanceof Error ? `Ошибка сохранения: ${e.message}` : "Ошибка сохранения" });
@@ -254,10 +484,16 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
 
     saveProject: async () => {
-      const { project, projectPath } = get();
+      const { project, projectPath, history } = get();
       try {
-        const path = await storage.saveToFile(project, projectPath ?? undefined);
-        set({ projectPath: path, status: `Сохранено: ${path}` });
+        const path = await storage.saveToFile(project, history, projectPath ?? undefined);
+        set({ projectPath: path });
+        withBranchGuard(() => {
+          recordOnly(
+            { operationType: "project.saved", description: `Проект «${project.title}» сохранён` },
+            `Сохранено: ${path}`,
+          );
+        });
       } catch (e) {
         if (e instanceof UserCancelledError) return;
         set({ status: e instanceof Error ? `Ошибка сохранения: ${e.message}` : "Ошибка сохранения" });
@@ -266,16 +502,29 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     openProject: async () => {
       try {
-        const { project, path } = await storage.loadFromFile();
+        const { project, history: loadedHistory, path } = await storage.loadFromFile();
+        const history = loadedHistory ?? (() => {
+          const h = createHistory(project);
+          return record(
+            h,
+            makeEntry(
+              { operationType: "project.loaded", description: `Проект «${project.title}» загружен` },
+              project,
+            ),
+          );
+        })();
         const clean = sanitize(project, project.rootMapId, null);
         set({
           project,
           projectPath: path,
+          history,
           ...clean,
           selectedEntityId: null,
           tool: "select",
-          history: emptyHistory(),
-          status: `Проект загружен: ${path}`,
+          branchConfirm: null,
+          status: loadedHistory
+            ? `Проект загружен: ${path}`
+            : `Проект загружен: ${path} (журнал начат заново)`,
         });
       } catch (e) {
         if (e instanceof UserCancelledError) return;
@@ -296,12 +545,25 @@ export async function initApp(): Promise<void> {
   try {
     const saved = await storage.loadAutosave();
     if (saved) {
+      const { project, history: loadedHistory } = saved;
       const { activeMapId } = useAppStore.getState();
-      const root = saved.maps[saved.rootMapId];
+      const history = loadedHistory ?? (() => {
+        const h = createHistory(project);
+        return record(
+          h,
+          makeEntry(
+            { operationType: "project.loaded", description: "Восстановлено автосохранение" },
+            project,
+          ),
+        );
+      })();
       useAppStore.setState({
-        project: saved,
-        activeMapId: saved.maps[activeMapId] ? activeMapId : saved.rootMapId,
-        status: root ? `Восстановлено автосохранение: «${saved.title}»` : "Готов к работе",
+        project,
+        history,
+        activeMapId: project.maps[activeMapId] ? activeMapId : project.rootMapId,
+        status: loadedHistory
+          ? `Восстановлено автосохранение: «${project.title}»`
+          : `Восстановлено автосохранение: «${project.title}» (журнал начат заново)`,
       });
       return;
     }
@@ -317,8 +579,8 @@ useAppStore.subscribe((state, prev) => {
   if (state.project === prev.project) return;
   if (autosaveTimer) clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => {
-    const { project } = useAppStore.getState();
-    storage.saveAutosave(project).catch(() => {
+    const { project, history } = useAppStore.getState();
+    storage.saveAutosave(project, history).catch(() => {
       useAppStore.setState({ status: "Ошибка автосохранения" });
     });
   }, 800);
