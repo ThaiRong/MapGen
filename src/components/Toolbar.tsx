@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { useAppStore } from "../state/store";
+import ArchiveDialog from "./ArchiveDialog";
 import ConfirmDialog from "./ConfirmDialog";
 
 export default function Toolbar() {
   const projectTitle = useAppStore((s) => s.project.title);
   const canUndo = useAppStore((s) => s.history.past.length > 0);
   const canRedo = useAppStore((s) => s.history.future.length > 0);
+  const archiveCount = useAppStore((s) => s.project.markerArchive.length);
   const tool = useAppStore((s) => s.tool);
   const [confirmNew, setConfirmNew] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
 
   const store = useAppStore.getState();
 
@@ -32,6 +35,13 @@ export default function Toolbar() {
       </button>
       <button disabled={!canRedo} onClick={() => store.redoChange()} title="Повторить (Ctrl+Y)">
         ↷ Повтор
+      </button>
+      <button
+        onClick={() => setArchiveOpen(true)}
+        disabled={archiveCount === 0}
+        title="Архив удалённых маркеров: просмотр и восстановление"
+      >
+        Архив ({archiveCount})
       </button>
 
       <div className="sep" />
@@ -72,6 +82,7 @@ export default function Toolbar() {
         }}
         onCancel={() => setConfirmNew(false)}
       />
+      <ArchiveDialog open={archiveOpen} onClose={() => setArchiveOpen(false)} />
     </div>
   );
 }

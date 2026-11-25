@@ -8,6 +8,7 @@ import {
   renameMap,
   renameMarker,
   renameProject,
+  restoreMarker,
   setMapScale,
   setMapView,
   ValidationError,
@@ -55,6 +56,7 @@ export interface AppState {
   renameMapById: (mapId: MapId, name: string) => void;
   renameSelectedMarker: (label: string) => void;
   deleteSelectedMarker: () => void;
+  restoreArchivedMarker: (archivedEntityId: EntityId) => void;
   deleteMapById: (mapId: MapId) => void;
   setScale: (mapId: MapId, scale: MapScale | undefined) => void;
   setView: (mapId: MapId, view: MapView) => void;
@@ -164,7 +166,21 @@ export const useAppStore = create<AppState>()((set, get) => {
       const { project, activeMapId, selectedEntityId } = get();
       if (!selectedEntityId) return;
       set({ selectedEntityId: null });
-      apply(deleteMarker(project, activeMapId, selectedEntityId), "Маркер удалён. Карта осталась в дереве");
+      apply(
+        deleteMarker(project, activeMapId, selectedEntityId),
+        "Маркер удалён в архив. Карта осталась в дереве; восстановление — кнопка «Архив»",
+      );
+    },
+
+    restoreArchivedMarker: (archivedEntityId) => {
+      const { project, activeMapId } = get();
+      try {
+        const result = restoreMarker(project, archivedEntityId);
+        apply(result.project, "Маркер восстановлен на прежнем месте");
+        if (result.mapId === activeMapId) set({ selectedEntityId: result.entityId });
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось восстановить маркер" });
+      }
     },
 
     deleteMapById: (mapId) => {

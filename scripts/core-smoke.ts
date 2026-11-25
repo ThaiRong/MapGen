@@ -6,6 +6,7 @@ import {
   moveMarker,
   renameMap,
   renameMarker,
+  restoreMarker,
   setMapScale,
   setMapView,
   validateProject,
@@ -150,5 +151,95 @@ assert(stepR.project === after, "redo возвращает новый проек
 let h2 = emptyHistory();
 for (let i = 0; i < 150; i += 1) h2 = commit(h2, before);
 assert(h2.past.length === 100, "история ограничена 100 шагами");
+
+// 13. Архив удалённых маркеров: удаление сохраняет маркер
+let p = createProject("Архив");
+const locA = addLocation(p, p.rootMapId, 111, 222);
+p = locA.project;
+const beforeDelete = p;
+p = deleteMarker(p, p.rootMapId, locA.entityId);
+assert(p.markerArchive.length === 1, "удалённый маркер попал в архив");
+assert(!p.maps[p.rootMapId].entities.some((e) => e.id === locA.entityId), "маркер убран с карты");
+assert(!!p.maps[locA.mapId], "связанная карта не удалена");
+assert(
+  p.markerArchive[0].entity.x === 111 && p.markerArchive[0].entity.y === 222,
+  "архив хранит прежние координаты",
+);
+
+// 14. Восстановление: прежние координаты и связь с картой
+const restoreResult = restoreMarker(p, locA.entityId);
+p = restoreResult.project;
+assert(p.markerArchive.length === 0, "архив очищается после восстановления");
+const restoredEntity = p.maps[p.rootMapId].entities.find((e) => e.id === locA.entityId)!;
+assert(restoredEntity.x === 111 && restoredEntity.y === 222, "маркер вернулся на прежние координаты");
+assert(restoredEntity.targetMapId === locA.mapId, "маркер снова ссылается на прежнюю карту");
+
+// 15. Восстановление невозможно, если целевая карта удалена — понятное сообщение
+let p2 = createProject("Архив 2");
+const locB = addLocation(p2, p2.rootMapId, 0, 0);
+p2 = locB.project;
+p2 = deleteMarker(p2, p2.rootMapId, locB.entityId);
+p2 = deleteMap(p2, locB.mapId);
+assert(p2.markerArchive.length === 1, "архив сохранился после удаления целевой карты");
+try {
+  restoreMarker(p2, locB.entityId);
+  assert(false, "восстановление с удалённой целевой картой должно бросить ошибку");
+} catch (e) {
+  assert(
+    e instanceof Error && e.message.includes("связанная карта удалена"),
+    "понятное сообщение об удалённой целевой карте",
+  );
+}
+
+// 16. Восстановление невозможно, если удалена карта-источник
+let p3 = createProject("Архив 3");
+const locC = addLocation(p3, p3.rootMapId, 0, 0);
+p3 = locC.project;
+p3 = deleteMarker(p3, p3.rootMapId, locC.entityId);
+try {
+  deleteMap(p3, p3.rootMapId);
+  assert(false, "удаление корня должно бросить ошибку");
+} catch {
+  assert(true, "корень защищён от удаления");
+}
+// Прямой сценарий «источник удалён»: корень защищён, поэтому проверяем
+// сообщение на состоянии с отсутствующей картой-источником.
+const brokenSource: typeof p3 = { ...p3, maps: {} };
+try {
+  restoreMarker(brokenSource, locC.entityId);
+  assert(false, "восстановление с удалённым источником должно бросить ошибку");
+} catch (e) {
+  assert(
+    e instanceof Error && e.message.includes("на которой стоял маркер, удалена"),
+    "понятное сообщение об удалённой карте-источнике",
+  );
+}
+
+// 17. Удаление и восстановление попадают в историю (снапшоты)
+let h3 = emptyHistory();
+h3 = commit(h3, beforeDelete);
+const afterDelete = deleteMarker(beforeDelete, beforeDelete.rootMapId, locA.entityId);
+const undoDelete = undo(h3, afterDelete);
+assert(
+  undoDelete.project!.markerArchive.length === 0 &&
+    undoDelete.project!.maps[undoDelete.project!.rootMapId].entities.length === 1,
+  "undo удаления возвращает маркер и очищает архив",
+);
+const h4 = commit(h3, afterDelete);
+const afterRestore = restoreMarker(afterDelete, locA.entityId).project;
+const undoRestore = undo(h4, afterRestore);
+assert(
+  undoRestore.project!.markerArchive.length === 1 &&
+    undoRestore.project!.maps[undoRestore.project!.rootMapId].entities.length === 0,
+  "undo восстановления возвращает маркер в архив",
+);
+
+// 18. Сериализация сохраняет архив; старые файлы без архива читаются
+const text2 = serializeProject(p);
+assert(deserializeProject(text2).markerArchive.length === p.markerArchive.length, "архив переживает сохранение");
+const legacy = JSON.parse(text2) as Record<string, unknown>;
+delete legacy.markerArchive;
+const legacyParsed = deserializeProject(JSON.stringify(legacy));
+assert(legacyParsed.markerArchive.length === 0, "файл v1 без архива загружается как пустой архив");
 
 console.log(`\nВсе ${passed} проверок пройдены`);

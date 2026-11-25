@@ -11,8 +11,21 @@ export interface Project {
   title: string;
   rootMapId: MapId;
   maps: Record<MapId, MapNode>;
+  markerArchive: ArchivedMarker[];
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Маркер, удалённый с карты. Хранит сущность в состоянии на момент
+ * удаления: восстановление вернёт прежние координаты и targetMapId.
+ * Записи архива переживают сохранение/загрузку проекта.
+ */
+export interface ArchivedMarker {
+  entity: LocationLinkEntity;
+  /** Карта, с которой маркер был удалён. */
+  sourceMapId: MapId;
+  archivedAt: string;
 }
 
 export interface MapScale {

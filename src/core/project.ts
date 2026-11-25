@@ -1,6 +1,7 @@
 import {
   PROJECT_FORMAT,
   PROJECT_VERSION,
+  type ArchivedMarker,
   type EntityId,
   type LocationLinkEntity,
   type MapId,
@@ -54,6 +55,7 @@ export function createProject(title = "Новый проект"): Project {
     title,
     rootMapId: root.id,
     maps: { [root.id]: root },
+    markerArchive: [],
     createdAt: ts,
     updatedAt: ts,
   };
@@ -173,12 +175,24 @@ export function moveMarker(
   });
 }
 
+/**
+ * Удаляет маркер с карты. Связанная карта не удаляется —
+ * маркер переносится в архив, откуда его можно восстановить.
+ */
 export function deleteMarker(project: Project, mapId: MapId, entityId: EntityId): Project {
   const map = project.maps[mapId];
   if (!map) throw new Error("Карта не найдена");
+  const entity = map.entities.find((e) => e.id === entityId);
+  if (!entity) throw new Error("Маркер не найден");
   const ts = now();
+  const archived: ArchivedMarker = {
+    entity: { ...entity },
+    sourceMapId: mapId,
+    archivedAt: ts,
+  };
   return touch({
     ...project,
+    markerArchive: [...project.markerArchive, archived],
     maps: {
       ...project.maps,
       [mapId]: {
@@ -188,6 +202,55 @@ export function deleteMarker(project: Project, mapId: MapId, entityId: EntityId)
       },
     },
   });
+}
+
+export interface RestoreMarkerResult {
+  project: Project;
+  mapId: MapId;
+  entityId: EntityId;
+}
+
+/**
+ * Восстанавливает маркер из архива: возвращает прежние координаты
+ * и вновь связывает с целевой картой. Бросает Error с понятным
+ * сообщением, если восстановить невозможно.
+ */
+export function restoreMarker(project: Project, archivedEntityId: EntityId): RestoreMarkerResult {
+  const index = project.markerArchive.findIndex((a) => a.entity.id === archivedEntityId);
+  if (index < 0) throw new Error("Маркер не найден в архиве");
+  const entry = project.markerArchive[index];
+
+  const source = project.maps[entry.sourceMapId];
+  if (!source) {
+    throw new Error("Нельзя восстановить: карта, на которой стоял маркер, удалена из проекта");
+  }
+  if (!project.maps[entry.entity.targetMapId]) {
+    throw new Error(
+      `Нельзя восстановить «${entry.entity.label}»: связанная карта удалена из проекта`,
+    );
+  }
+  if (source.entities.some((e) => e.id === entry.entity.id)) {
+    throw new Error("Такой маркер уже существует на карте");
+  }
+
+  const ts = now();
+  const restored: LocationLinkEntity = { ...entry.entity, updatedAt: ts };
+  return {
+    project: touch({
+      ...project,
+      markerArchive: project.markerArchive.filter((_, i) => i !== index),
+      maps: {
+        ...project.maps,
+        [entry.sourceMapId]: {
+          ...source,
+          updatedAt: ts,
+          entities: [...source.entities, restored],
+        },
+      },
+    }),
+    mapId: entry.sourceMapId,
+    entityId: restored.id,
+  };
 }
 
 export function deleteMap(project: Project, mapId: MapId): Project {
@@ -269,7 +332,7 @@ function isIsoDate(value: unknown): boolean {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
 
-function validateEntity(raw: unknown, maps: Record<MapId, MapNode>, where: string): LocationLinkEntity {
+function validateEntityShape(raw: unknown, where: string): LocationLinkEntity {
   if (!isRecord(raw)) throw new ValidationError(`${where}: сущность повреждена`);
   if (raw.kind !== "location-link") throw new ValidationError(`${where}: неизвестный тип сущности`);
   if (typeof raw.id !== "string" || !raw.id) throw new ValidationError(`${where}: у сущности нет id`);
@@ -277,13 +340,41 @@ function validateEntity(raw: unknown, maps: Record<MapId, MapNode>, where: strin
     throw new ValidationError(`${where}: у сущности нет координат`);
   }
   if (typeof raw.label !== "string") throw new ValidationError(`${where}: у сущности нет подписи`);
-  if (typeof raw.targetMapId !== "string" || !maps[raw.targetMapId]) {
-    throw new ValidationError(`${where}: маркер ссылается на отсутствующую карту`);
+  if (typeof raw.targetMapId !== "string" || !raw.targetMapId) {
+    throw new ValidationError(`${where}: у сущности нет целевой карты`);
   }
   if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) {
     throw new ValidationError(`${where}: повреждены даты сущности`);
   }
   return raw as unknown as LocationLinkEntity;
+}
+
+function validateEntity(raw: unknown, maps: Record<MapId, MapNode>, where: string): LocationLinkEntity {
+  const entity = validateEntityShape(raw, where);
+  if (!maps[entity.targetMapId]) {
+    throw new ValidationError(`${where}: маркер ссылается на отсутствующую карту`);
+  }
+  return entity;
+}
+
+// Архив удалённых маркеров появился после первых файлов формата v1:
+// в них поле отсутствует, читаем как пустой архив.
+function validateArchive(raw: unknown, where: string): ArchivedMarker[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new ValidationError(`${where}: архив удалённых маркеров повреждён`);
+  return raw.map((entry, i) => {
+    const place = `${where}, запись №${i + 1}`;
+    if (!isRecord(entry)) throw new ValidationError(`${place}: запись повреждена`);
+    const entity = validateEntityShape(entry.entity, `${place}: маркер`);
+    if (typeof entry.sourceMapId !== "string" || !entry.sourceMapId) {
+      throw new ValidationError(`${place}: нет карты-источника`);
+    }
+    const archivedAt = entry.archivedAt;
+    if (typeof archivedAt !== "string" || !isIsoDate(archivedAt)) {
+      throw new ValidationError(`${place}: повреждена дата архивации`);
+    }
+    return { entity, sourceMapId: entry.sourceMapId, archivedAt };
+  });
 }
 
 export function validateProject(raw: unknown): Project {
@@ -339,6 +430,8 @@ export function validateProject(raw: unknown): Project {
     }
     map.entities = map.entities.map((e, i) => validateEntity(e, maps, `Карта «${map.name}», сущность №${i + 1}`));
   }
+
+  raw.markerArchive = validateArchive(raw.markerArchive, "Архив удалённых маркеров");
 
   return raw as unknown as Project;
 }
