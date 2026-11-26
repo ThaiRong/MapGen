@@ -15,6 +15,11 @@ import {
   deleteMap,
   deleteMarker,
   deletePrimitive,
+  deletePrimitives,
+  applyGenerationToMap,
+  countReplaceableGenerated,
+  fallbackTypeForKind,
+  findPrimitive,
   moveMarker,
   movePrimitive,
   movePrimitives,
@@ -39,6 +44,7 @@ import {
   ROOT_MAP_NAME,
   NEW_LOCATION_NAME,
 } from "../src/core/project";
+import { generate } from "../src/core/generation/generate";
 import { buildTree, getPathToRoot, getDescendantIds } from "../src/core/tree";
 import {
   canRedo,
@@ -713,6 +719,166 @@ pr = deletePrimitives(pr, pr.rootMapId, [rLine.id, copyRes.primitiveId]);
 assert(
   pr.maps[pr.rootMapId].primitives.length === beforeBatch - 2,
   "пакетное удаление: оба примитива удалены одной транзакцией",
+);
+
+// 35. Генерация: детерминизм, лимиты, сеттинг-агностичность
+const baseGenSpec = {
+  seed: "тест-зерно",
+  relief: 0.6,
+  moisture: 0.5,
+  temperature: 0,
+  fluidLevel: 0.42,
+  areaDensity: 0.5,
+  lineDensity: 0.4,
+  pointDensity: 0.5,
+  detail: 0.5,
+  fieldScale: 1,
+  bounds: { x: -500, y: -400, width: 1000, height: 800 },
+  typeMapping: {
+    area: pr.legend.find((t) => t.shape === "area")!.id,
+    line: rLineType.id,
+    point: pr.legend.find((t) => t.shape === "point")!.id,
+    label: pr.legend.find((t) => t.shape === "label")!.id,
+  },
+  labels: { enabled: false },
+};
+const genSpec = (over: Record<string, unknown> = {}) => ({
+  ...baseGenSpec,
+  ...over,
+}) as Parameters<typeof generate>[0];
+const genA = generate(genSpec());
+const genB = generate(genSpec());
+assert(
+  JSON.stringify(genA) === JSON.stringify(genB),
+  "детерминизм: два вызова generate с одним spec — побайтово идентичный результат",
+);
+const genC = generate(genSpec({ seed: "другое-зерно" }));
+assert(
+  JSON.stringify(genA) !== JSON.stringify(genC),
+  "другое зерно — другой результат",
+);
+assert(
+  genA.primitives.every((p) => p.origin === "generated" && p.typeId),
+  "сгенерированные примитивы: origin='generated', typeId из маппинга",
+);
+assert(
+  genA.primitives.every((p) => !/лес|река|гора|город|деревня|болото|пустын/i.test(p.name)),
+  "имена нейтральные, без сеттинговых слов",
+);
+const zeroSpec = generate(
+  genSpec({ areaDensity: 0, lineDensity: 0, pointDensity: 0 }),
+);
+assert(zeroSpec.primitives.length === 0, "нулевые плотности — ноль примитивов, без ошибок");
+const maxSpec = generate(
+  genSpec({ areaDensity: 1, lineDensity: 1, pointDensity: 1, detail: 1 }),
+);
+assert(
+  maxSpec.stats.areas <= 96 && maxSpec.stats.lines <= 160 && maxSpec.stats.points <= 400,
+  "лимиты плотностей соблюдены на максимуме",
+);
+assert(
+  maxSpec.primitives.every(
+    (p) => p.kind === "point" || p.kind === "label" || p.points.length <= 400,
+  ),
+  "лимит вершин на примитив соблюдён",
+);
+
+// 36. Защита правок: перегенерация не трогает ручные и заблокированные
+let pg = createProject("Генерация-защита");
+const manualLine = createLinePrimitive(
+  pg.maps[pg.rootMapId],
+  pg.legend.find((t) => t.shape === "line")!.id,
+  [{ x: 1, y: 1 }, { x: 50, y: 50 }],
+);
+pg = addPrimitive(pg, pg.rootMapId, manualLine);
+const genSpecP = {
+  ...baseGenSpec,
+  typeMapping: {
+    area: pg.legend.find((t) => t.shape === "area")!.id,
+    line: pg.legend.find((t) => t.shape === "line")!.id,
+    point: pg.legend.find((t) => t.shape === "point")!.id,
+    label: pg.legend.find((t) => t.shape === "label")!.id,
+  },
+};
+const firstApply = applyGenerationToMap(pg, pg.rootMapId, genSpecP as Parameters<typeof generate>[0]);
+pg = firstApply.project;
+const generatedCount = pg.maps[pg.rootMapId].primitives.filter((p) => p.origin === "generated").length;
+assert(generatedCount > 0, "после применения есть сгенерированные примитивы");
+assert(
+  pg.maps[pg.rootMapId].primitives.some((p) => p.id === manualLine.id),
+  "ручной примитив на месте после применения генерации",
+);
+assert(!!pg.maps[pg.rootMapId].generation, "map.generation сохранена на карте");
+// Блокируем один сгенерированный примитив
+const firstGen = pg.maps[pg.rootMapId].primitives.find((p) => p.origin === "generated")!;
+pg = updatePrimitive(pg, pg.rootMapId, firstGen.id, { locked: true });
+// Перегенерация с тем же зерном — идентичный результат, но locked внешний
+const regenSpec = { ...genSpecP, seed: "второй-прогон" };
+const replaceable = countReplaceableGenerated(pg, pg.rootMapId);
+assert(replaceable === generatedCount - 1, "счётчик замены исключает заблокированный примитив");
+const secondApply = applyGenerationToMap(pg, pg.rootMapId, regenSpec as Parameters<typeof generate>[0]);
+pg = secondApply.project;
+assert(secondApply.removed === replaceable, "заменены только незаблокированные сгенерированные");
+assert(
+  pg.maps[pg.rootMapId].primitives.some((p) => p.id === manualLine.id && p.origin === "manual"),
+  "ручной примитив пережил перегенерацию",
+);
+assert(
+  pg.maps[pg.rootMapId].primitives.some((p) => p.id === firstGen.id && p.locked),
+  "заблокированный сгенерированный примитив не изменён и не удалён",
+);
+assert(
+  pg.maps[pg.rootMapId].generation?.generationId === secondApply.generationId,
+  "map.generation обновлена на новое поколение",
+);
+// Повторное применение той же спеки: ручных дубликатов не плодится
+const generatedIds = pg.maps[pg.rootMapId].primitives
+  .filter((p) => p.origin === "generated")
+  .map((p) => p.id);
+assert(new Set(generatedIds).size === generatedIds.length, "дубликатов среди сгенерированных нет");
+
+// 37. Миграция: проект без origin и без map.generation открывается
+const legacyGen = JSON.parse(serializeProject(pg)) as Record<string, unknown>;
+const legacyGenMaps = legacyGen.maps as Record<string, Record<string, unknown>>;
+for (const m of Object.values(legacyGenMaps)) {
+  delete m.generation;
+  const prims = m.primitives as Record<string, unknown>[];
+  if (Array.isArray(prims)) for (const p of prims) delete p.origin;
+}
+const migratedGen = deserializeProject(JSON.stringify(legacyGen));
+const migratedRoot = migratedGen.maps[pg.rootMapId];
+assert(migratedRoot.generation === undefined, "миграция: map.generation отсутствует — без краша");
+assert(
+  migratedRoot.primitives.every((p) => p.origin === "manual"),
+  "миграция: старые примитивы получили origin='manual'",
+);
+assert(
+  migratedRoot.primitives.some((p) => p.id === manualLine.id),
+  "миграция: примитивы не потерялись",
+);
+
+// 38. Воспроизводимость после сохранения: перегенерация с тем же зерном
+// даёт идентичную геометрию (сравниваем подписи геометрии без id/дат).
+const geomSignature = (pro: Project) =>
+  pro.maps[pro.rootMapId].primitives
+    .filter((p) => p.origin === "generated")
+    .map((p) =>
+      p.kind === "line" || p.kind === "area"
+        ? `${p.kind}:${p.points.map((pt) => `${pt.x.toFixed(3)},${pt.y.toFixed(3)}`).join("|")}`
+        : `${p.kind}:${p.x},${p.y}`,
+    )
+    .sort()
+    .join(";");
+const savedText = serializeSave(pg, afterRewrite);
+const loadedProject = deserializeSave(savedText).project;
+const regenAfterLoad = applyGenerationToMap(
+  loadedProject,
+  loadedProject.rootMapId,
+  regenSpec as Parameters<typeof generate>[0],
+);
+assert(
+  geomSignature(regenAfterLoad.project) === geomSignature(pg),
+  "перегенерация с тем же зерном после сохранения/загрузки — идентичная геометрия",
 );
 
 // 34. Редактирование вершин: перемещение и вставка

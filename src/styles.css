@@ -587,6 +587,92 @@ input[type="checkbox"] {
   margin-top: 6px;
 }
 
+/* Панель генерации */
+.gen-panel {
+  width: 280px;
+  min-width: 230px;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.gen-title {
+  padding: 10px 12px 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.gen-body {
+  padding: 10px 12px;
+  overflow: auto;
+  flex: 1;
+  font-size: 13px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.gen-body .field {
+  margin-bottom: 8px;
+}
+
+.gen-body .field label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.gen-body .row {
+  display: flex;
+  gap: 6px;
+}
+
+.gen-body .row > input {
+  flex: 1;
+}
+
+.gen-stats {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.gen-warnings {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--selected);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--selected);
+}
+
+.gen-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.gen-bounds-btn {
+  margin-top: 4px;
+  width: 100%;
+}
+
+.gen-body .hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
 /* Status bar */
 .status-bar {
   display: flex;

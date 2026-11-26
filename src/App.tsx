@@ -7,6 +7,7 @@ import LegendPanel from "./components/LegendPanel";
 import CanvasView from "./components/CanvasView";
 import HistoryPanel from "./components/HistoryPanel";
 import Inspector from "./components/Inspector";
+import GenerationPanel from "./components/GenerationPanel";
 import StatusBar from "./components/StatusBar";
 import ConfirmDialog from "./components/ConfirmDialog";
 
@@ -94,6 +95,11 @@ export default function App() {
       }
       if (e.key === "Escape") {
         const s = useAppStore.getState();
+        if (s.generationBoundsPick) {
+          e.preventDefault();
+          s.cancelGenerationBoundsPick();
+          return;
+        }
         if (s.labelDraft) {
           e.preventDefault();
           s.cancelLabelDraft();
@@ -146,6 +152,7 @@ export default function App() {
         <CanvasView />
         <HistoryPanel />
         <Inspector />
+        <GenerationPanel />
       </div>
       <StatusBar />
       <ConfirmDialog

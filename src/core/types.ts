@@ -50,6 +50,8 @@ export interface MapNode {
   entities: Entity[];
   /** Нарисованные вручную примитивы (итерация 2). */
   primitives: Primitive[];
+  /** Последнее применение генерации на этой карте (итерация 3). */
+  generation?: MapGeneration;
   view?: MapView;
   createdAt: string;
   updatedAt: string;
@@ -68,8 +70,43 @@ export interface LocationLinkEntity {
   updatedAt: string;
 }
 
+/* ---------- Генерация (итерация 3) ---------- */
+
+/** Сеттинг-агностичная спецификация генерации. */
+export interface GenerationSpec {
+  seed: string;
+  /** 0..1 — амплитуда и резкость рельефа */
+  relief: number;
+  /** 0..1 */
+  moisture: number;
+  /** -1..1 */
+  temperature: number;
+  /** 0..1 — порог жидкости (изолиния) */
+  fluidLevel: number;
+  /** 0..1 */
+  areaDensity: number;
+  /** 0..1 */
+  lineDensity: number;
+  /** 0..1 */
+  pointDensity: number;
+  /** 0..1 — число октав и сила упрощения */
+  detail: number;
+  /** частота структур поля */
+  fieldScale: number;
+  bounds: { x: number; y: number; width: number; height: number };
+  typeMapping: { area: string; line: string; point: string; label: string };
+  labels: { enabled: boolean };
+}
+
+export interface MapGeneration {
+  spec: GenerationSpec;
+  generationId: string;
+  appliedAt: number;
+}
+
 /* ---------- Примитивы (итерация 2) ---------- */
 
+export type PrimitiveOrigin = "manual" | "generated";
 export type PrimitiveKind = "point" | "line" | "area" | "label";
 export type LegendShape = PrimitiveKind;
 
@@ -84,6 +121,10 @@ interface PrimitiveBase {
   name: string;
   /** Ссылка на тип легенды. */
   typeId: string;
+  /** Происхождение: нарисован вручную или создан генерацией. */
+  origin: PrimitiveOrigin;
+  /** Для origin='generated' — id применения генерации (защита правок). */
+  generationId?: string;
   /** Произвольная заметка мастера. */
   note: string;
   visible: boolean;

@@ -56,6 +56,14 @@ type DragState =
       curY: number;
     }
   | {
+      mode: "genbounds";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      curX: number;
+      curY: number;
+    }
+  | {
       mode: "rotate";
       pointerId: number;
       primitiveId: string;
@@ -174,6 +182,8 @@ export default function CanvasView() {
   const selectedPrimitiveIds = useAppStore((s) => s.selectedPrimitiveIds);
   const drawingDraft = useAppStore((s) => s.drawingDraft);
   const labelDraft = useAppStore((s) => s.labelDraft);
+  const generationPreview = useAppStore((s) => s.generationPreview);
+  const generationBoundsRect = useAppStore((s) => s.generationBoundsRect);
   const tool = useAppStore((s) => s.tool);
   const project = useAppStore((s) => s.project);
 
@@ -540,18 +550,84 @@ export default function CanvasView() {
       }
 
       // Рамка мультивыделения.
-      if (drag?.mode === "band") {
+      if (drag?.mode === "band" || drag?.mode === "genbounds") {
         const x = Math.min(drag.startX, drag.curX);
         const y = Math.min(drag.startY, drag.curY);
         const bw = Math.abs(drag.curX - drag.startX);
         const bh = Math.abs(drag.curY - drag.startY);
         ctx.save();
-        ctx.strokeStyle = SELECTION_COLOR;
-        ctx.fillStyle = "rgba(240, 161, 60, 0.08)";
+        ctx.strokeStyle = drag.mode === "genbounds" ? "#4f8cff" : SELECTION_COLOR;
+        ctx.fillStyle = drag.mode === "genbounds" ? "rgba(79, 140, 255, 0.08)" : "rgba(240, 161, 60, 0.08)";
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
         ctx.fillRect(x, y, bw, bh);
         ctx.strokeRect(x, y, bw, bh);
+        ctx.restore();
+      }
+
+      // Предпросмотр генерации — поверх карты, полупрозрачно.
+      const preview = state.generationPreview;
+      if (preview) {
+        ctx.save();
+        for (const p of preview.primitives) {
+          const type = legendTypeById(state.project, p.typeId);
+          if (!type) continue;
+          ctx.globalAlpha = type.opacity * 0.55;
+          ctx.strokeStyle = type.color;
+          ctx.fillStyle = type.color;
+          ctx.lineWidth = Math.max(1, type.strokeWidth);
+          ctx.setLineDash(type.strokeStyle === "dashed" ? [10, 6] : []);
+          if (p.kind === "area") {
+            if (p.points.length >= 3) {
+              ctx.beginPath();
+              const s0 = toS(p.points[0]);
+              ctx.moveTo(s0.x, s0.y);
+              for (let i = 1; i < p.points.length; i += 1) {
+                const s = toS(p.points[i]);
+                ctx.lineTo(s.x, s.y);
+              }
+              ctx.closePath();
+              ctx.globalAlpha = type.opacity * 0.55 * 0.35;
+              ctx.fill();
+              ctx.globalAlpha = type.opacity * 0.55;
+              ctx.stroke();
+            }
+          } else if (p.kind === "line") {
+            if (p.points.length >= 2) {
+              ctx.beginPath();
+              const s0 = toS(p.points[0]);
+              ctx.moveTo(s0.x, s0.y);
+              for (let i = 1; i < p.points.length; i += 1) {
+                const s = toS(p.points[i]);
+                ctx.lineTo(s.x, s.y);
+              }
+              ctx.stroke();
+            }
+          } else if (p.kind === "point") {
+            const c = toS({ x: p.x, y: p.y });
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+          } else if (p.kind === "label") {
+            const c = toS({ x: p.x, y: p.y });
+            ctx.font = `${p.fontSize}px system-ui, sans-serif`;
+            ctx.textAlign = "center";
+            ctx.fillText(p.text, c.x, c.y);
+          }
+        }
+        ctx.restore();
+      }
+
+      // Заданная рамка области генерации (пока панель ждёт применения).
+      if (generationBoundsRect && state.generationPreview) {
+        const r = generationBoundsRect;
+        const a = toS({ x: r.x, y: r.y });
+        const b = toS({ x: r.x + r.width, y: r.y + r.height });
+        ctx.save();
+        ctx.strokeStyle = "#4f8cff";
+        ctx.setLineDash([8, 5]);
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
         ctx.restore();
       }
 
@@ -572,6 +648,7 @@ export default function CanvasView() {
     if (Math.abs(state.viewZoom - view.zoom) > 0.001) {
       state.setViewZoom(view.zoom);
     }
+    state.setGenerationViewport({ centerX: view.centerX, centerY: view.centerY, zoom: view.zoom, w, h });
   }, [size, worldToScreen, rotationHandlePos]);
 
   const schedulePersistView = useCallback(() => {
@@ -597,7 +674,7 @@ export default function CanvasView() {
 
   useEffect(() => {
     draw();
-  }, [project, selectedEntityId, selectedPrimitiveIds, drawingDraft, tool, draw]);
+  }, [project, selectedEntityId, selectedPrimitiveIds, drawingDraft, generationPreview, generationBoundsRect, tool, draw]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -659,6 +736,20 @@ export default function CanvasView() {
       }
 
       if (e.button !== 0) return;
+
+      // Одноразовое задание рамки области генерации — в любом инструменте.
+      if (state.generationBoundsPick) {
+        dragRef.current = {
+          mode: "genbounds",
+          pointerId: e.pointerId,
+          startX: pos.x,
+          startY: pos.y,
+          curX: pos.x,
+          curY: pos.y,
+        };
+        canvas.setPointerCapture(e.pointerId);
+        return;
+      }
 
       switch (state.tool) {
         case "add-location":
@@ -857,7 +948,7 @@ export default function CanvasView() {
         drag.liveY = world.y;
         drag.moved = true;
         draw();
-      } else if (drag.mode === "band") {
+      } else if (drag.mode === "band" || drag.mode === "genbounds") {
         drag.curX = pos.x;
         drag.curY = pos.y;
         draw();
@@ -904,6 +995,25 @@ export default function CanvasView() {
       }
       if (drag.mode === "pen") {
         state.finishDrawing();
+      }
+      if (drag.mode === "genbounds") {
+        const x1 = Math.min(drag.startX, pos.x);
+        const y1 = Math.min(drag.startY, pos.y);
+        const x2 = Math.max(drag.startX, pos.x);
+        const y2 = Math.max(drag.startY, pos.y);
+        if (x2 - x1 >= 8 && y2 - y1 >= 8) {
+          const wa = screenToWorld(x1, y1);
+          const wb = screenToWorld(x2, y2);
+          state.setGenerationBoundsRect({
+            x: Math.round(Math.min(wa.x, wb.x)),
+            y: Math.round(Math.min(wa.y, wb.y)),
+            width: Math.round(Math.abs(wb.x - wa.x)),
+            height: Math.round(Math.abs(wb.y - wa.y)),
+          });
+          state.setStatus("Рамка области генерации задана");
+        } else {
+          state.cancelGenerationBoundsPick();
+        }
       }
       if (drag.mode === "band") {
         const x1 = Math.min(drag.startX, pos.x);

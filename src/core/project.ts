@@ -7,6 +7,7 @@ import {
   type LegendType,
   type LinePrimitive,
   type LocationLinkEntity,
+  type MapGeneration,
   type MapId,
   type MapNode,
   type MapScale,
@@ -17,6 +18,7 @@ import {
   type Project,
   type Vec2,
 } from "./types";
+import { generate } from "./generation/generate";
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -537,6 +539,7 @@ function primitiveBase(map: MapNode, kind: PrimitiveKind, typeId: string) {
     kind,
     name: nextPrimitiveName(map, kind),
     typeId,
+    origin: "manual" as const,
     note: "",
     visible: true,
     locked: false,
@@ -735,6 +738,7 @@ export function insertPrimitiveCopy(
     kind: source.kind,
     name: nextPrimitiveName(map, source.kind),
     typeId: source.typeId,
+    origin: "manual" as const,
     note: source.note,
     visible: source.visible,
     locked: source.locked,
@@ -960,6 +964,130 @@ export function restorePrimitiveToMap(project: Project, mapId: MapId, primitive:
   });
 }
 
+/* ---------- Генерация (итерация 3) ---------- */
+
+/** Сколько примитивов заменит перегенерация (сгенерированные незаблокированные текущего поколения). */
+export function countReplaceableGenerated(project: Project, mapId: MapId): number {
+  const map = project.maps[mapId];
+  if (!map?.generation) return 0;
+  const prevId = map.generation.generationId;
+  return map.primitives.filter(
+    (p) => p.origin === "generated" && p.generationId === prevId && !p.locked,
+  ).length;
+}
+
+export interface ApplyGenerationResult {
+  project: Project;
+  generationId: string;
+  warnings: string[];
+  added: number;
+  removed: number;
+  stats: { areas: number; lines: number; points: number; labels: number };
+}
+
+/**
+ * Применяет генерацию к карте одной транзакцией:
+ * - считает результат по спеке (детерминированно);
+ * - удаляет только примитивы прошлой генерации этой карты
+ *   (origin='generated' с прежним generationId, не заблокированные);
+ * - ручные примитивы (origin='manual') и locked=true никогда не трогает;
+ * - валидирует маппинг типов: неподходящий тип заменяется базовым
+ *   типом формы с предупреждением; новые типы не создаются;
+ * - сохраняет map.generation = { spec, generationId, appliedAt }.
+ */
+export function applyGenerationToMap(
+  project: Project,
+  mapId: MapId,
+  spec: import("./types").GenerationSpec,
+): ApplyGenerationResult {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const result = generate(spec);
+  const warnings: string[] = [...result.warnings];
+  const generationId = newId();
+  const ts = now();
+
+  const resolveType = (kind: PrimitiveKind, typeId: string): string => {
+    const t = legendTypeById(project, typeId);
+    if (t && t.shape === kind) return typeId;
+    const fallback = fallbackTypeForKind(project, kind);
+    if (!fallback) {
+      throw new Error(`В проекте нет типа легенды формы «${kind}» — создайте его вручную`);
+    }
+    warnings.push(
+      `Тип «${typeId || "—"}» не подходит для формы «${kind}» — использован «${fallback.name}»`,
+    );
+    return fallback.id;
+  };
+  const mapping: Record<PrimitiveKind, string> = {
+    area: resolveType("area", spec.typeMapping.area),
+    line: resolveType("line", spec.typeMapping.line),
+    point: resolveType("point", spec.typeMapping.point),
+    label: resolveType("label", spec.typeMapping.label),
+  };
+
+  let current = map;
+  let removed = 0;
+  if (map.generation) {
+    const prevId = map.generation.generationId;
+    const kept = current.primitives.filter((p) => {
+      const drop = p.origin === "generated" && p.generationId === prevId && !p.locked;
+      if (drop) removed += 1;
+      return !drop;
+    });
+    if (kept.length !== current.primitives.length) {
+      current = { ...current, primitives: kept };
+    }
+  }
+
+  let work: Project = { ...project, maps: { ...project.maps, [mapId]: current } };
+  let added = 0;
+  for (const src of result.primitives) {
+    const target = work.maps[mapId];
+    const copy = {
+      ...(src as unknown as Record<string, unknown>),
+      id: newId(),
+      name: nextPrimitiveName(target, src.kind),
+      typeId: mapping[src.kind],
+      generationId,
+      createdAt: ts,
+      updatedAt: ts,
+    } as unknown as Primitive;
+    if (
+      (copy.kind === "line" || copy.kind === "area") &&
+      (src.kind === "line" || src.kind === "area")
+    ) {
+      copy.points = src.points.map((pt) => ({ ...pt }));
+    }
+    work = addPrimitive(work, mapId, copy);
+    added += 1;
+  }
+
+  work = touch({
+    ...work,
+    maps: {
+      ...work.maps,
+      [mapId]: {
+        ...work.maps[mapId],
+        generation: { spec, generationId, appliedAt: Date.now() },
+      },
+    },
+  });
+  return {
+    project: work,
+    generationId,
+    warnings,
+    added,
+    removed,
+    stats: {
+      areas: result.stats.areas,
+      lines: result.stats.lines,
+      points: result.stats.points,
+      labels: result.stats.labels,
+    },
+  };
+}
+
 function collectDescendants(maps: Record<MapId, MapNode>, mapId: MapId): Set<MapId> {
   const result = new Set<MapId>([mapId]);
   let changed = true;
@@ -1088,9 +1216,12 @@ function tryValidatePrimitive(raw: unknown, legend: LegendType[]): Primitive | n
     if (typeof raw.id !== "string" || !raw.id) return null;
     if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) return null;
     const kind = raw.kind as PrimitiveKind;
+    // Миграция: у примитивов до итерации 3 нет origin — считаем ручными.
+    const origin = raw.origin === "generated" ? ("generated" as const) : ("manual" as const);
     const base = {
       id: raw.id,
       kind,
+      origin,
       name:
         typeof raw.name === "string" && raw.name.trim()
           ? raw.name.trim()
@@ -1101,6 +1232,9 @@ function tryValidatePrimitive(raw: unknown, legend: LegendType[]): Primitive | n
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt,
     };
+    if (origin === "generated" && typeof raw.generationId === "string" && raw.generationId) {
+      (base as Record<string, unknown>).generationId = raw.generationId;
+    }
     // typeId: должен ссылаться на существующий тип той же формы;
     // иначе — фолбэк на первый подходящий тип, а если типов такой
     // формы нет — примитив выбрасывается (безопасно, не краш).
@@ -1152,6 +1286,51 @@ function validatePrimitives(raw: unknown, legend: LegendType[], where: string): 
     if (primitive) result.push(primitive);
   }
   return result;
+}
+
+/**
+ * Проверяет map.generation. Повреждённая спека не роняет загрузку:
+ * генерация считается неприменённой (поле отбрасывается).
+ */
+function tryValidateGeneration(raw: unknown): MapGeneration | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isRecord(raw)) return undefined;
+  if (typeof raw.generationId !== "string" || !raw.generationId) return undefined;
+  if (typeof raw.appliedAt !== "number" || !Number.isFinite(raw.appliedAt)) return undefined;
+  const spec = raw.spec;
+  if (!isRecord(spec)) return undefined;
+  const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  if (typeof spec.seed !== "string") return undefined;
+  if (
+    !num(spec.relief) ||
+    !num(spec.moisture) ||
+    !num(spec.temperature) ||
+    !num(spec.fluidLevel) ||
+    !num(spec.areaDensity) ||
+    !num(spec.lineDensity) ||
+    !num(spec.pointDensity) ||
+    !num(spec.detail) ||
+    !num(spec.fieldScale)
+  ) {
+    return undefined;
+  }
+  if (
+    !isRecord(spec.bounds) ||
+    !num(spec.bounds.x) ||
+    !num(spec.bounds.y) ||
+    !num(spec.bounds.width) ||
+    !num(spec.bounds.height) ||
+    spec.bounds.width <= 0 ||
+    spec.bounds.height <= 0
+  ) {
+    return undefined;
+  }
+  if (!isRecord(spec.typeMapping)) return undefined;
+  for (const shape of ["area", "line", "point", "label"]) {
+    if (typeof spec.typeMapping[shape] !== "string") return undefined;
+  }
+  if (!isRecord(spec.labels) || typeof spec.labels.enabled !== "boolean") return undefined;
+  return raw as unknown as MapGeneration;
 }
 
 export function validateProject(raw: unknown): Project {
@@ -1209,6 +1388,7 @@ export function validateProject(raw: unknown): Project {
     }
     map.entities = map.entities.map((e, i) => validateEntity(e, maps, `Карта «${map.name}», сущность №${i + 1}`));
     map.primitives = validatePrimitives(map.primitives, legend, `Карта «${map.name}»`);
+    map.generation = tryValidateGeneration(map.generation);
   }
 
   raw.markerArchive = validateArchive(raw.markerArchive, "Архив удалённых маркеров");

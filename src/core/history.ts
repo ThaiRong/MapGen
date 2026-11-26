@@ -23,7 +23,8 @@ export type OperationType =
   | "legend.updated"
   | "legend.deleted"
   | "archive.entryDeleted"
-  | "archive.cleared";
+  | "archive.cleared"
+  | "map.generated";
 
 export interface MarkerRestoreInfo {
   kind: "marker";
@@ -217,6 +218,7 @@ const OPERATION_TYPES = new Set<string>([
   "legend.deleted",
   "archive.entryDeleted",
   "archive.cleared",
+  "map.generated",
 ]);
 
 function isIsoDate(value: unknown): boolean {

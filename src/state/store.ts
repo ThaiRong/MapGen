@@ -4,6 +4,7 @@ import {
   addLegendType,
   addLocation,
   addPrimitive,
+  applyGenerationToMap,
   clearMarkerArchive,
   createAreaPrimitive,
   createLabelPrimitive,
@@ -53,6 +54,7 @@ import {
 } from "../core/history";
 import type {
   EntityId,
+  GenerationSpec,
   LegendShape,
   LocationLinkEntity,
   MapId,
@@ -129,6 +131,19 @@ export interface AppState {
   clipboard: Primitive | null;
   /** Счётчик вставок: каждая следующая копия смещается дальше. */
   pasteCount: number;
+  /** Живой предпросмотр генерации (не пишется в проект и историю). */
+  generationPreview: {
+    primitives: Primitive[];
+    stats: { areas: number; lines: number; points: number; labels: number; vertices: number };
+    warnings: string[];
+  } | null;
+  generationCalculating: boolean;
+  /** Текущий вид холста — для области генерации «Видимая область». */
+  generationViewport: { centerX: number; centerY: number; zoom: number; w: number; h: number } | null;
+  /** Режим одноразового задания рамки области генерации на холсте. */
+  generationBoundsPick: boolean;
+  /** Рамка области генерации, заданная на холсте (режим «Выделенный прямоугольник»). */
+  generationBoundsRect: { x: number; y: number; width: number; height: number } | null;
   tool: Tool;
   /** Черновик рисуемой линии/области (ветвь, предпросмотр на холсте). */
   drawingDraft: DrawingDraft | null;
@@ -160,6 +175,14 @@ export interface AppState {
   copySelectedPrimitive: () => void;
   pastePrimitive: () => void;
   duplicateSelectedPrimitive: () => void;
+  setGenerationPreview: (preview: AppState["generationPreview"]) => void;
+  setGenerationCalculating: (v: boolean) => void;
+  setGenerationViewport: (v: NonNullable<AppState["generationViewport"]>) => void;
+  startGenerationBoundsPick: () => void;
+  cancelGenerationBoundsPick: () => void;
+  setGenerationBoundsRect: (rect: { x: number; y: number; width: number; height: number } | null) => void;
+  applyGeneration: (spec: GenerationSpec) => void;
+  regenerateGeneration: () => void;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -320,6 +343,11 @@ export const useAppStore = create<AppState>()((set, get) => {
     selectedPrimitiveIds: [],
     clipboard: null,
     pasteCount: 0,
+    generationPreview: null,
+    generationCalculating: false,
+    generationViewport: null,
+    generationBoundsPick: false,
+    generationBoundsRect: null,
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -409,6 +437,59 @@ export const useAppStore = create<AppState>()((set, get) => {
     duplicateSelectedPrimitive: () => {
       get().copySelectedPrimitive();
       get().pastePrimitive();
+    },
+
+    setGenerationPreview: (preview) => set({ generationPreview: preview }),
+    setGenerationCalculating: (v) => set({ generationCalculating: v }),
+    setGenerationViewport: (v) => {
+      const prev = get().generationViewport;
+      if (
+        prev &&
+        Math.abs(prev.centerX - v.centerX) < 1 &&
+        Math.abs(prev.centerY - v.centerY) < 1 &&
+        Math.abs(prev.zoom - v.zoom) < 0.001 &&
+        prev.w === v.w &&
+        prev.h === v.h
+      ) {
+        return;
+      }
+      set({ generationViewport: v });
+    },
+    startGenerationBoundsPick: () =>
+      set({ generationBoundsPick: true, status: "Обведите на холсте прямоугольник области генерации" }),
+    cancelGenerationBoundsPick: () => set({ generationBoundsPick: false }),
+    setGenerationBoundsRect: (rect) => set({ generationBoundsPick: false, generationBoundsRect: rect }),
+
+    applyGeneration: (spec) => {
+      const { project, activeMapId } = get();
+      try {
+        const result = applyGenerationToMap(project, activeMapId, spec);
+        const warnText = result.warnings.length > 0 ? ` Предупреждения: ${result.warnings.join("; ")}` : "";
+        withBranchGuard(() => {
+          applyNow(
+            result.project,
+            {
+              operationType: "map.generated",
+              description: `Сгенерирована местность: ${result.stats.areas} областей, ${result.stats.lines} линий, ${result.stats.points} точек`,
+              mapId: activeMapId,
+            },
+            `Генерация применена: добавлено ${result.added}, заменено ${result.removed}.${warnText}`,
+          );
+          set({ generationPreview: null, selectedPrimitiveIds: [] });
+        });
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось применить генерацию" });
+      }
+    },
+
+    regenerateGeneration: () => {
+      const { project, activeMapId } = get();
+      const gen = project.maps[activeMapId]?.generation;
+      if (!gen) {
+        set({ status: "На этой карте генерация ещё не применялась — сначала нажмите «Применить к карте»" });
+        return;
+      }
+      get().applyGeneration(gen.spec);
     },
 
     openMap: (id) => {
