@@ -270,6 +270,31 @@ export function restoreMarker(project: Project, archivedEntityId: EntityId): Res
   };
 }
 
+/**
+ * Восстанавливает маркер по записи истории (restoreInfo записи
+ * marker.deleted, 1.5.2). В отличие от голого restoreMarkerEntity,
+ * убирает маркер из архива удалённых, если он там ещё числится, —
+ * иначе один и тот же маркер можно было бы восстановить дважды
+ * (и из истории, и из архива).
+ */
+export function restoreMarkerFromRecord(
+  project: Project,
+  sourceMapId: MapId,
+  entity: LocationLinkEntity,
+): RestoreMarkerResult {
+  const result = restoreMarkerEntity(project, sourceMapId, entity);
+  if (!result.project.markerArchive.some((a) => a.entity.id === entity.id)) {
+    return result;
+  }
+  return {
+    ...result,
+    project: touch({
+      ...result.project,
+      markerArchive: result.project.markerArchive.filter((a) => a.entity.id !== entity.id),
+    }),
+  };
+}
+
 export function deleteMap(project: Project, mapId: MapId): Project {
   if (mapId === project.rootMapId) throw new Error("Корневую карту нельзя удалить");
   if (!project.maps[mapId]) return project;

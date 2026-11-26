@@ -10,7 +10,7 @@ import {
   renameMarker,
   renameProject,
   restoreMarker,
-  restoreMarkerEntity,
+  restoreMarkerFromRecord,
   setMapScale,
   setMapView,
   ValidationError,
@@ -341,7 +341,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         return;
       }
       try {
-        const result = restoreMarkerEntity(project, info.sourceMapId, info.entity);
+        const result = restoreMarkerFromRecord(project, info.sourceMapId, info.entity);
         const mapId = info.sourceMapId;
         const entityId = info.entity.id;
         const label = info.entity.label;

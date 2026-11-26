@@ -8,6 +8,7 @@ import {
   renameMarker,
   restoreMarker,
   restoreMarkerEntity,
+  restoreMarkerFromRecord,
   setMapScale,
   setMapView,
   validateProject,
@@ -335,6 +336,42 @@ try {
 } catch {
   assert(true, "дубликаты маркеров при восстановлении блокируются");
 }
+
+// 19.1 Восстановление через журнал сбрасывает запись в архиве
+let pj = createProject("История vs архив");
+const locJ = addLocation(pj, pj.rootMapId, 30, 40);
+pj = locJ.project;
+const markerJ = pj.maps[pj.rootMapId].entities[0];
+const afterDelJ = deleteMarker(pj, pj.rootMapId, locJ.entityId);
+assert(afterDelJ.markerArchive.length === 1, "маркер удалён и в архиве");
+const viaHistory = restoreMarkerFromRecord(
+  afterDelJ,
+  pj.rootMapId,
+  { ...markerJ },
+);
+assert(
+  viaHistory.project.markerArchive.length === 0,
+  "восстановление через журнал убирает маркер из архива",
+);
+const jEntity = viaHistory.project.maps[pj.rootMapId].entities.find((e) => e.id === locJ.entityId)!;
+assert(
+  jEntity.x === 30 && jEntity.y === 40 && jEntity.targetMapId === locJ.mapId,
+  "восстановление через журнал: прежние координаты и связь с картой",
+);
+// Повторное восстановление из архива теперь невозможно: записи нет,
+// а дубликат на карте заблокирован.
+try {
+  restoreMarker(viaHistory.project, locJ.entityId);
+  assert(false, "восстановление из архива после восстановления через журнал должно бросить ошибку");
+} catch {
+  assert(true, "двойного восстановления (журнал + архив) не возникает");
+}
+// Маркер, которого нет в архиве, восстанавливается без побочных эффектов
+const noArchive = restoreMarkerFromRecord(afterDelJ, pj.rootMapId, { ...markerJ });
+assert(
+  noArchive.project.maps[pj.rootMapId].entities.length === 1,
+  "восстановление по записи работает и без архивной копии",
+);
 
 // 20. Журнал переживает сериализацию; повреждения не ломают загрузку
 const histFile = toHistoryFile(afterRewrite);
