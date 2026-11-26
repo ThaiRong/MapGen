@@ -488,6 +488,10 @@ export default function CanvasView() {
           state.addPointPrimitiveAt(world.x, world.y);
           return;
         case "label":
+          // Важно: отменяем действие по умолчанию, иначе браузер по
+          // завершении этого клика перенесёт фокус на canvas и только что
+          // открытое поле подписи тут же получит blur и закроется.
+          e.preventDefault();
           state.startLabelDraft(world.x, world.y);
           return;
         case "line":
@@ -738,25 +742,40 @@ function LabelDraftInput({
 }) {
   const confirmLabelDraft = useAppStore((s) => s.confirmLabelDraft);
   const cancelLabelDraft = useAppStore((s) => s.cancelLabelDraft);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const doneRef = useRef(false);
   const screen = worldToScreen({ x, y });
+
+  useEffect(() => {
+    // Надёжнее autoFocus в WebView2: фокус ставим явно после монтирования.
+    inputRef.current?.focus();
+  }, []);
+
+  const finish = (commit: boolean) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    const value = inputRef.current?.value ?? "";
+    if (commit) confirmLabelDraft(value);
+    else cancelLabelDraft();
+  };
 
   return (
     <div className="label-draft" style={{ left: screen.x, top: screen.y }}>
       <input
-        autoFocus
+        ref={inputRef}
         type="text"
         placeholder="Текст подписи"
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
-            confirmLabelDraft((e.target as HTMLInputElement).value);
+            finish(true);
           }
           if (e.key === "Escape") {
             e.preventDefault();
-            cancelLabelDraft();
+            finish(false);
           }
         }}
-        onBlur={() => cancelLabelDraft()}
+        onBlur={() => finish(false)}
       />
     </div>
   );

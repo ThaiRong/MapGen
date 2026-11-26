@@ -52,6 +52,13 @@ export interface HistoryEntry {
   entityId: EntityId | null;
   snapshot: Project;
   restoreInfo?: HistoryRestoreInfo;
+  /**
+   * Ключ коалесцирования: если последняя применённая запись имеет тот же
+   * ключ (например, «legend:<typeId>» при непрерывной правке типа легенды),
+   * новая запись ЗАМЕНЯЕТ её — в истории остаётся только конечное
+   * состояние непрерывной правки.
+   */
+  coalesceKey?: string;
 }
 
 /**
@@ -78,6 +85,7 @@ export interface EntryInput {
   mapId?: MapId | null;
   entityId?: EntityId | null;
   restoreInfo?: HistoryRestoreInfo;
+  coalesceKey?: string;
 }
 
 export function makeEntry(input: EntryInput, snapshot: Project): HistoryEntry {
@@ -90,6 +98,7 @@ export function makeEntry(input: EntryInput, snapshot: Project): HistoryEntry {
     entityId: input.entityId ?? null,
     snapshot,
     ...(input.restoreInfo ? { restoreInfo: input.restoreInfo } : null),
+    ...(input.coalesceKey ? { coalesceKey: input.coalesceKey } : null),
   };
 }
 
@@ -101,6 +110,17 @@ export function makeEntry(input: EntryInput, snapshot: Project): HistoryEntry {
  * проекта не раздувается бесконечно.
  */
 export function record(history: ProjectHistory, entry: HistoryEntry): ProjectHistory {
+  // Коалесцирование: непрерывная правка одного объекта (тот же ключ,
+  // позиция в конце журнала) заменяет последнюю запись — фиксируется
+  // только конечное состояние, а не каждый промежуточный шаг.
+  const atEnd = history.position === history.entries.length - 1;
+  if (entry.coalesceKey && atEnd && history.position >= 0) {
+    const last = history.entries[history.position];
+    if (last.coalesceKey === entry.coalesceKey) {
+      const entries = [...history.entries.slice(0, -1), entry];
+      return { ...history, entries, position: entries.length - 1 };
+    }
+  }
   const kept = history.entries.slice(0, history.position + 1);
   let entries = [...kept, entry];
   let base = history.base;
@@ -257,6 +277,7 @@ function tryValidateEntry(raw: unknown): HistoryEntry | null {
       mapId: (raw.mapId as MapId | null) ?? null,
       entityId: (raw.entityId as EntityId | null) ?? null,
       snapshot,
+      ...(typeof raw.coalesceKey === "string" ? { coalesceKey: raw.coalesceKey } : null),
       ...(restoreInfo ? { restoreInfo } : null),
     };
   } catch {

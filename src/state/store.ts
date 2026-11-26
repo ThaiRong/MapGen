@@ -637,6 +637,7 @@ export const useAppStore = create<AppState>()((set, get) => {
           {
             operationType: "legend.updated",
             description: `Тип легенды «${current.name}» изменён`,
+            coalesceKey: `legend:${typeId}`,
           },
         );
       } catch (e) {

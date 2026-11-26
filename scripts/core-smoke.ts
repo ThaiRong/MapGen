@@ -227,6 +227,38 @@ assert(afterRewrite.entries.length === 2 && afterRewrite.position === 1, "нов
 assert(afterRewrite.entries[1].description === "Шаг 3", "перезаписанная ветвь заменена новой записью");
 assert(!canRedo(afterRewrite), "после перезаписи redo недоступно");
 
+// 12.1 Коалесцирование: непрерывная правка одного объекта — одна запись
+let hcoal = createHistory(projectX);
+hcoal = record(
+  hcoal,
+  makeEntry({ operationType: "legend.updated", description: "Тип «Линия» изменён", coalesceKey: "legend:t1" }, renamedX),
+);
+const coalSnap2 = renameMap(renamedX, renamedX.rootMapId, "Коалесцение 2");
+hcoal = record(
+  hcoal,
+  makeEntry({ operationType: "legend.updated", description: "Тип «Линия» изменён", coalesceKey: "legend:t1" }, coalSnap2),
+);
+const coalSnap3 = renameMap(coalSnap2, coalSnap2.rootMapId, "Коалесцение 3");
+hcoal = record(
+  hcoal,
+  makeEntry({ operationType: "legend.updated", description: "Тип «Линия» изменён", coalesceKey: "legend:t1" }, coalSnap3),
+);
+assert(hcoal.entries.length === 1, "три правки подряд — одна запись в журнале");
+assert(hcoal.entries[0].snapshot === coalSnap3, "запись хранит конечное состояние правки");
+hcoal = record(
+  hcoal,
+  makeEntry({ operationType: "legend.updated", description: "Другой тип", coalesceKey: "legend:t2" }, coalSnap3),
+);
+assert(hcoal.entries.length === 2, "правка другого объекта — новая запись");
+// Коалесцирование не работает на отменённой ветви (запись не в конце)
+const backCoal = jumpTo(hcoal, 0);
+const coalSnap4 = renameMap(coalSnap3, coalSnap3.rootMapId, "Ветка");
+const hcoal2 = record(
+  backCoal.history,
+  makeEntry({ operationType: "legend.updated", description: "После возврата", coalesceKey: "legend:t2" }, coalSnap4),
+);
+assert(hcoal2.entries.length === 2, "после возврата назад запись не сливается с отменённой ветвью");
+
 // 13. Архив удалённых маркеров: удаление сохраняет маркер
 let p = createProject("Архив");
 const locA = addLocation(p, p.rootMapId, 111, 222);

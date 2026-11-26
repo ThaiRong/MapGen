@@ -144,9 +144,12 @@ function LegendTypeEditor({
       <div className="field-row">
         <div className="field">
           <label>Цвет</label>
+          {/* Неконтролируемый инпут: React не перебивает перетаскивание
+              пипетки на каждом шаге. Редактор целиком пересоздаётся
+              (key на LegendTypeEditor) при смене выбранного типа. */}
           <input
             type="color"
-            value={type.color}
+            defaultValue={type.color}
             onChange={(e) => updateLegendTypeProps(type.id, { color: e.target.value })}
           />
         </div>
@@ -157,7 +160,7 @@ function LegendTypeEditor({
             min={0}
             max={1}
             step={0.05}
-            value={type.opacity}
+            defaultValue={type.opacity}
             onChange={(e) => updateLegendTypeProps(type.id, { opacity: Number(e.target.value) })}
           />
         </div>
