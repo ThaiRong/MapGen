@@ -1,16 +1,30 @@
 import {
+  addLegendType,
   addLocation,
+  addPrimitive,
+  countLegendTypeUsage,
+  createAreaPrimitive,
+  createDefaultLegend,
+  createLabelPrimitive,
+  createLinePrimitive,
+  createPointPrimitive,
   createProject,
+  deleteLegendType,
   deleteMap,
   deleteMarker,
+  deletePrimitive,
   moveMarker,
+  movePrimitive,
   renameMap,
   renameMarker,
   restoreMarker,
   restoreMarkerEntity,
   restoreMarkerFromRecord,
+  restorePrimitiveToMap,
   setMapScale,
   setMapView,
+  updateLegendType,
+  updatePrimitive,
   validateProject,
   ValidationError,
   ROOT_MAP_NAME,
@@ -404,6 +418,167 @@ assert(!("history" in loaded.project), "у проекта нет поля histor
 const legacyNoHistory = JSON.parse(serializeProject(projectX)) as Record<string, unknown>;
 const loadedLegacy = deserializeSave(JSON.stringify(legacyNoHistory));
 assert(loadedLegacy.history === null, "старый файл без истории загружается (history = null)");
+
+// 22. Легенда: 4 нейтральных базовых типа по умолчанию
+let pl = createProject("Примитивы");
+assert(pl.legend.length === 4, "по умолчанию ровно 4 типа легенды");
+assert(
+  ["point", "line", "area", "label"].every((s) => pl.legend.some((t) => t.shape === s)),
+  "базовые типы покрывают все 4 формы",
+);
+assert(pl.legend.every((t) => t.isBuiltin && t.category === "Базовые"), "базовые типы помечены isBuiltin");
+assert(createDefaultLegend().length === 4, "createDefaultLegend отдаёт 4 типа");
+
+// 23. Примитивы: создание, именование, геометрия
+const rootMap = pl.maps[pl.rootMapId];
+const pointType = pl.legend.find((t) => t.shape === "point")!;
+const lineType = pl.legend.find((t) => t.shape === "line")!;
+const areaType = pl.legend.find((t) => t.shape === "area")!;
+const labelType = pl.legend.find((t) => t.shape === "label")!;
+const p1 = createPointPrimitive(rootMap, pointType.id, 10, 20);
+assert(p1.name === "Точка 1" && p1.kind === "point", "точка создаётся с базовым именем");
+pl = addPrimitive(pl, pl.rootMapId, p1);
+const l1 = createLinePrimitive(pl.maps[pl.rootMapId], lineType.id, [{ x: 0, y: 0 }, { x: 5, y: 5 }]);
+pl = addPrimitive(pl, pl.rootMapId, l1);
+const a1 = createAreaPrimitive(pl.maps[pl.rootMapId], areaType.id, [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]);
+pl = addPrimitive(pl, pl.rootMapId, a1);
+const lbl1 = createLabelPrimitive(pl.maps[pl.rootMapId], labelType.id, 3, 4, "Вход");
+pl = addPrimitive(pl, pl.rootMapId, lbl1);
+assert(pl.maps[pl.rootMapId].primitives.length === 4, "четыре примитива на карте");
+assert(l1.name === "Линия 1" && a1.name === "Область 1" && lbl1.name === "Подпись 1", "нумерация имён по виду");
+try {
+  createLinePrimitive(rootMap, lineType.id, [{ x: 0, y: 0 }]);
+  assert(false, "линия из 1 точки должна бросить ошибку");
+} catch {
+  assert(true, "линия: минимум 2 точки");
+}
+try {
+  createAreaPrimitive(rootMap, areaType.id, [{ x: 0, y: 0 }, { x: 1, y: 1 }]);
+  assert(false, "область из 2 вершин должна бросить ошибку");
+} catch {
+  assert(true, "область: минимум 3 вершины");
+}
+
+// 24. Перемещение: точка — x/y, линия — все точки
+pl = movePrimitive(pl, pl.rootMapId, p1.id, 5, -5);
+const p1m = pl.maps[pl.rootMapId].primitives.find((p) => p.id === p1.id)!;
+assert(p1m.kind === "point" && p1m.x === 15 && p1m.y === 15, "точка смещена по x/y");
+pl = movePrimitive(pl, pl.rootMapId, l1.id, 100, 100);
+const l1m = pl.maps[pl.rootMapId].primitives.find((p) => p.id === l1.id)!;
+assert(
+  l1m.kind === "line" && l1m.points[0].x === 100 && l1m.points[1].y === 105,
+  "линия: смещены все точки",
+);
+
+// 25. Обновление: смена типа только совместимой формы, no-op не меняет проект
+pl = updatePrimitive(pl, pl.rootMapId, p1.id, { note: "Ключевая точка", locked: true });
+const p1u = pl.maps[pl.rootMapId].primitives.find((p) => p.id === p1.id)!;
+assert(p1u.note === "Ключевая точка" && p1u.locked === true, "заметка и блокировка сохранены");
+const beforeNoop = pl;
+pl = updatePrimitive(pl, pl.rootMapId, p1.id, { note: "Ключевая точка" });
+assert(pl === beforeNoop, "no-op патч не меняет проект (нет шумных записей)");
+try {
+  updatePrimitive(pl, pl.rootMapId, p1.id, { typeId: lineType.id });
+  assert(false, "точке нельзя назначить тип линии");
+} catch (e) {
+  assert(e instanceof Error && e.message.includes("не подходит"), "несовместимая форма типа отклонена");
+}
+
+// 26. Удаление и восстановление примитива (атомарно, без дубликатов)
+const snapshotOfA1 = pl.maps[pl.rootMapId].primitives.find((p) => p.id === a1.id)!;
+pl = deletePrimitive(pl, pl.rootMapId, a1.id);
+assert(!pl.maps[pl.rootMapId].primitives.some((p) => p.id === a1.id), "область удалена");
+pl = restorePrimitiveToMap(pl, pl.rootMapId, snapshotOfA1);
+assert(pl.maps[pl.rootMapId].primitives.some((p) => p.id === a1.id), "область восстановлена");
+try {
+  restorePrimitiveToMap(pl, pl.rootMapId, snapshotOfA1);
+  assert(false, "повторное восстановление должно бросить ошибку");
+} catch {
+  assert(true, "дубликат примитива при восстановлении блокируется");
+}
+try {
+  restorePrimitiveToMap(pl, "no-such-map", snapshotOfA1);
+  assert(false, "восстановление на удалённую карту должно бросить ошибку");
+} catch {
+  assert(true, "понятная ошибка при удалённой карте-источнике");
+}
+
+// 27. Легенда: пользовательские типы, редактирование, правила удаления
+const added = addLegendType(pl, { name: "Стена", shape: "line" });
+pl = added.project;
+const wall = pl.legend.find((t) => t.id === added.typeId)!;
+assert(!wall.isBuiltin && wall.shape === "line", "пользовательский тип «Стена» (line)");
+pl = updateLegendType(pl, wall.id, { color: "#ff0000", strokeWidth: 4, strokeStyle: "dashed", category: "Стены" });
+const wallU = pl.legend.find((t) => t.id === wall.id)!;
+assert(wallU.strokeStyle === "dashed" && wallU.category === "Стены", "тип легенды отредактирован");
+const builtinPoint = pl.legend.find((t) => t.isBuiltin && t.shape === "point")!;
+try {
+  updateLegendType(pl, builtinPoint.id, { shape: "line" });
+  assert(false, "форму базового типа менять нельзя");
+} catch {
+  assert(true, "форма базового типа защищена");
+}
+// Тип используется → удаление запрещено
+pl = updatePrimitive(pl, pl.rootMapId, l1.id, { typeId: wall.id });
+assert(countLegendTypeUsage(pl, wall.id) === 1, "подсчёт использования типа");
+try {
+  deleteLegendType(pl, wall.id);
+  assert(false, "используемый тип удалять нельзя");
+} catch (e) {
+  assert(e instanceof Error && e.message.includes("используют"), "понятная причина: тип используется");
+}
+// Пользовательский неиспользуемый тип → удаляется
+const extra = addLegendType(pl, { name: "Временный", shape: "area" });
+pl = deleteLegendType(extra.project, extra.typeId);
+assert(!pl.legend.some((t) => t.name === "Временный"), "неиспользуемый пользовательский тип удалён");
+// Базовый тип — единственный своей формы → удаление запрещено
+try {
+  deleteLegendType(pl, builtinPoint.id);
+  assert(false, "единственный базовый тип формы удалять нельзя");
+} catch {
+  assert(true, "покрытие формы базовыми типами защищено");
+}
+
+// 28. Миграция: старый проект без legend/primitives получает значения по умолчанию
+const legacyProject = JSON.parse(serializeSave(pl, afterRewrite)) as Record<string, unknown>;
+delete legacyProject.legend;
+const mapsRaw = legacyProject.maps as Record<string, Record<string, unknown>>;
+for (const m of Object.values(mapsRaw)) delete m.primitives;
+const migrated = deserializeSave(JSON.stringify(legacyProject));
+assert(migrated.project.legend.length === 4, "миграция: созданы 4 базовых типа легенды");
+assert(
+  Object.values(migrated.project.maps).every((m) => Array.isArray(m.primitives) && m.primitives.length === 0),
+  "миграция: пустые списки примитивов на всех картах",
+);
+assert(legacyProject.rootMapId === migrated.project.rootMapId, "миграция: маркеры и карты не потеряны");
+
+// 29. Валидация примитивов: битый typeId → фолбэк; битая геометрия → отбраковка
+const brokenType = JSON.parse(serializeProject(pl)) as Record<string, unknown>;
+const brokenMaps = brokenType.maps as Record<string, Record<string, unknown>>;
+const rootRaw = brokenMaps[pl.rootMapId];
+rootRaw.primitives = [
+  { ...JSON.parse(JSON.stringify(p1m)), typeId: "no-such-type" }, // фолбэк на тип формы point
+  { id: "bad-line", kind: "line", typeId: wall.id, name: "x", note: "", visible: true, locked: false, points: [{ x: 0, y: 0 }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, // <2 точек → отбраковка
+  { kind: "alien" }, // неизвестный вид → отбраковка
+];
+const repaired = deserializeProject(JSON.stringify(brokenType));
+const repairedRoot = repaired.maps[repaired.rootMapId];
+const repairedP1 = repairedRoot.primitives.find((p) => p.id === p1.id)!;
+assert(repairedP1.typeId !== "no-such-type", "битый typeId заменён фолбэком");
+assert(
+  repaired.legend.find((t) => t.id === repairedP1.typeId)?.shape === "point",
+  "фолбэк — тип формы point",
+);
+assert(!repairedRoot.primitives.some((p) => p.id === "bad-line"), "линия из 1 точки отброшена");
+assert(!repairedRoot.primitives.some((p) => p.kind === ("alien" as never)), "неизвестный вид отброшен");
+
+// 30. Сериализация: примитивы и легенда переживают сохранение
+const roundTrip = deserializeSave(serializeSave(pl, afterRewrite));
+assert(roundTrip.project.legend.length === pl.legend.length, "легенда переживает сохранение");
+assert(
+  roundTrip.project.maps[pl.rootMapId].primitives.length === pl.maps[pl.rootMapId].primitives.length,
+  "примитивы переживают сохранение",
+);
 
 // 18. Сериализация сохраняет архив; старые файлы без архива читаются
 const text2 = serializeProject(p);

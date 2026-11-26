@@ -21,6 +21,7 @@ export default function HistoryPanel() {
   const undoChange = useAppStore((s) => s.undoChange);
   const redoChange = useAppStore((s) => s.redoChange);
   const restoreFromHistory = useAppStore((s) => s.restoreMarkerFromHistory);
+  const restorePrimitiveFromHistory = useAppStore((s) => s.restorePrimitiveFromHistory);
 
   if (!open) return null;
 
@@ -57,14 +58,15 @@ export default function HistoryPanel() {
           const isCurrent = index === history.position;
           const isFuture = index > history.position;
           const info = entry.restoreInfo;
-          const sourceOk = info ? !!maps[info.sourceMapId] : false;
-          const targetOk = info ? !!maps[info.entity.targetMapId] : false;
-          const alreadyLive = info
-            ? !!maps[info.sourceMapId]?.entities.some((e) => e.id === info.entity.id)
+          const isMarkerRestore = entry.operationType === "marker.deleted" && info?.kind === "marker";
+          const markerInfo = isMarkerRestore && info.kind === "marker" ? info : null;
+          const sourceOk = markerInfo ? !!maps[markerInfo.sourceMapId] : false;
+          const targetOk = markerInfo ? !!maps[markerInfo.entity.targetMapId] : false;
+          const alreadyLive = markerInfo
+            ? !!maps[markerInfo.sourceMapId]?.entities.some((e) => e.id === markerInfo.entity.id)
             : false;
-          const canRestore =
-            entry.operationType === "marker.deleted" && !!info && sourceOk && targetOk && !alreadyLive;
-          const restoreReason = !info
+          const canRestore = isMarkerRestore && sourceOk && targetOk && !alreadyLive;
+          const restoreReason = !markerInfo
             ? null
             : alreadyLive
               ? "Маркер уже восстановлен"
@@ -73,6 +75,20 @@ export default function HistoryPanel() {
                 : !targetOk
                   ? "Связанная карта удалена из проекта"
                   : "Вернуть маркер на карту";
+          const primInfo =
+            entry.operationType === "primitive.deleted" && info?.kind === "primitive" ? info : null;
+          const primLive = primInfo
+            ? !!maps[primInfo.mapId]?.primitives.some((p) => p.id === primInfo.primitive.id)
+            : false;
+          const primMapOk = primInfo ? !!maps[primInfo.mapId] : false;
+          const primCanRestore = primInfo !== null && primMapOk && !primLive;
+          const primReason = !primInfo
+            ? null
+            : primLive
+              ? "Примитив уже восстановлен"
+              : !primMapOk
+                ? "Карта, на которой был примитив, удалена"
+                : "Вернуть примитив на карту";
           return (
             <li
               key={entry.id}
@@ -82,7 +98,7 @@ export default function HistoryPanel() {
             >
               <span className="history-time">{formatTime(entry.timestamp)}</span>
               <span className="history-desc">{entry.description}</span>
-              {entry.operationType === "marker.deleted" && info && (
+              {markerInfo && (
                 <button
                   className="history-restore"
                   disabled={!canRestore}
@@ -93,6 +109,19 @@ export default function HistoryPanel() {
                   }}
                 >
                   Восстановить маркер
+                </button>
+              )}
+              {primInfo && (
+                <button
+                  className="history-restore"
+                  disabled={!primCanRestore}
+                  title={primReason ?? ""}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    restorePrimitiveFromHistory(entry.id);
+                  }}
+                >
+                  Восстановить примитив
                 </button>
               )}
             </li>

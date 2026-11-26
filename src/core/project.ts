@@ -3,12 +3,19 @@ import {
   PROJECT_VERSION,
   type ArchivedMarker,
   type EntityId,
+  type LegendShape,
+  type LegendType,
+  type LinePrimitive,
   type LocationLinkEntity,
   type MapId,
   type MapNode,
   type MapScale,
   type MapView,
+  type PointPrimitive,
+  type Primitive,
+  type PrimitiveKind,
   type Project,
+  type Vec2,
 } from "./types";
 
 export class ValidationError extends Error {
@@ -40,6 +47,7 @@ export function createMap(name: string, parentId: MapId | null): MapNode {
     name,
     parentId,
     entities: [],
+    primitives: [],
     createdAt: ts,
     updatedAt: ts,
   };
@@ -56,6 +64,7 @@ export function createProject(title = "Новый проект"): Project {
     rootMapId: root.id,
     maps: { [root.id]: root },
     markerArchive: [],
+    legend: createDefaultLegend(),
     createdAt: ts,
     updatedAt: ts,
   };
@@ -81,6 +90,7 @@ export function addLocation(
     name: NEW_LOCATION_NAME,
     parentId: parentMapId,
     entities: [],
+    primitives: [],
     createdAt: ts,
     updatedAt: ts,
   };
@@ -351,6 +361,362 @@ export function countChildren(project: Project, mapId: MapId): number {
   return count;
 }
 
+/* ---------- Легенда (итерация 2) ---------- */
+
+const LEGEND_BUILTIN_CATEGORY = "Базовые";
+
+function builtinType(
+  name: string,
+  shape: LegendShape,
+  color: string,
+  opacity: number,
+  strokeWidth: number,
+): LegendType {
+  const ts = now();
+  return {
+    id: newId(),
+    name,
+    category: LEGEND_BUILTIN_CATEGORY,
+    shape,
+    color,
+    opacity,
+    strokeWidth,
+    strokeStyle: "solid",
+    visible: true,
+    isBuiltin: true,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+}
+
+/** Ровно 4 нейтральных базовых типа — никакой сеттинг-стилистики. */
+export function createDefaultLegend(): LegendType[] {
+  return [
+    builtinType("Точка", "point", "#4f8cff", 1, 2),
+    builtinType("Линия", "line", "#9aa3b2", 1, 2),
+    builtinType("Область", "area", "#8a94a6", 1, 2),
+    builtinType("Подпись", "label", "#d7d9e0", 1, 2),
+  ];
+}
+
+export function legendTypeById(project: Project, typeId: string): LegendType | undefined {
+  return project.legend.find((t) => t.id === typeId);
+}
+
+export function legendTypesByShape(project: Project, shape: LegendShape): LegendType[] {
+  return project.legend.filter((t) => t.shape === shape);
+}
+
+/** Первый подходящий тип для примитива данного вида (фолбэк при рисовании). */
+export function fallbackTypeForKind(project: Project, kind: PrimitiveKind): LegendType | undefined {
+  return legendTypesByShape(project, kind)[0];
+}
+
+export interface AddLegendTypeResult {
+  project: Project;
+  typeId: string;
+}
+
+/** Создаёт пользовательский тип легенды. Форму задаёт вызывающий код. */
+export function addLegendType(
+  project: Project,
+  input: { name: string; shape: LegendShape },
+): AddLegendTypeResult {
+  const ts = now();
+  const type: LegendType = {
+    id: newId(),
+    name: input.name.trim() || "Новый тип",
+    category: "",
+    shape: input.shape,
+    color: "#9aa3b2",
+    opacity: 1,
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    visible: true,
+    isBuiltin: false,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+  return {
+    project: touch({ ...project, legend: [...project.legend, type] }),
+    typeId: type.id,
+  };
+}
+
+export type LegendTypePatch = Partial<
+  Pick<
+    LegendType,
+    "name" | "category" | "shape" | "color" | "opacity" | "strokeWidth" | "strokeStyle" | "visible"
+  >
+>;
+
+export function updateLegendType(project: Project, typeId: string, patch: LegendTypePatch): Project {
+  const type = legendTypeById(project, typeId);
+  if (!type) throw new Error("Тип легенды не найден");
+  if (type.isBuiltin && patch.shape !== undefined && patch.shape !== type.shape) {
+    throw new Error("Нельзя менять форму базового типа");
+  }
+  const ts = now();
+  return touch({
+    ...project,
+    legend: project.legend.map((t) =>
+      t.id === typeId ? { ...t, ...patch, name: patch.name !== undefined ? patch.name.trim() || t.name : t.name, updatedAt: ts } : t,
+    ),
+  });
+}
+
+/** Сколько примитивов использует тип легенды. */
+export function countLegendTypeUsage(project: Project, typeId: string): number {
+  let count = 0;
+  for (const map of Object.values(project.maps)) {
+    for (const primitive of map.primitives) {
+      if (primitive.typeId === typeId) count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * Удаляет тип легенды. Бросает Error с понятной причиной, если удалить
+ * нельзя: тип используется примитивами или является последним опорным
+ * типом своей формы (базовые типы нельзя удалять, если это сломает
+ * покрытие формы).
+ */
+export function deleteLegendType(project: Project, typeId: string): Project {
+  const type = legendTypeById(project, typeId);
+  if (!type) throw new Error("Тип легенды не найден");
+  const usage = countLegendTypeUsage(project, typeId);
+  if (usage > 0) {
+    throw new Error(`Нельзя удалить тип «${type.name}»: его используют ${usage} примитивов`);
+  }
+  const sameShapeLeft = project.legend.filter((t) => t.shape === type.shape && t.id !== typeId);
+  if (type.isBuiltin && sameShapeLeft.length === 0) {
+    throw new Error(`Нельзя удалить базовый тип «${type.name}»: это единственный тип формы «${type.shape}»`);
+  }
+  return touch({ ...project, legend: project.legend.filter((t) => t.id !== typeId) });
+}
+
+/* ---------- Примитивы (итерация 2) ---------- */
+
+const PRIMITIVE_BASE_NAME: Record<PrimitiveKind, string> = {
+  point: "Точка",
+  line: "Линия",
+  area: "Область",
+  label: "Подпись",
+};
+
+function nextPrimitiveName(map: MapNode, kind: PrimitiveKind): string {
+  const count = map.primitives.filter((p) => p.kind === kind).length;
+  return `${PRIMITIVE_BASE_NAME[kind]} ${count + 1}`;
+}
+
+function primitiveBase(map: MapNode, kind: PrimitiveKind, typeId: string) {
+  const ts = now();
+  return {
+    id: newId(),
+    kind,
+    name: nextPrimitiveName(map, kind),
+    typeId,
+    note: "",
+    visible: true,
+    locked: false,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+}
+
+export function createPointPrimitive(
+  map: MapNode,
+  typeId: string,
+  x: number,
+  y: number,
+): PointPrimitive {
+  return { ...primitiveBase(map, "point", typeId), kind: "point", x, y };
+}
+
+export function createLinePrimitive(
+  map: MapNode,
+  typeId: string,
+  points: Vec2[],
+): LinePrimitive {
+  if (points.length < 2) throw new Error("Линия должна иметь минимум 2 точки");
+  return { ...primitiveBase(map, "line", typeId), kind: "line", points: points.map((p) => ({ ...p })) };
+}
+
+export function createAreaPrimitive(
+  map: MapNode,
+  typeId: string,
+  points: Vec2[],
+): Primitive {
+  if (points.length < 3) throw new Error("Область должна иметь минимум 3 вершины");
+  return { ...primitiveBase(map, "area", typeId), kind: "area", points: points.map((p) => ({ ...p })) };
+}
+
+export function createLabelPrimitive(
+  map: MapNode,
+  typeId: string,
+  x: number,
+  y: number,
+  text: string,
+): Primitive {
+  return {
+    ...primitiveBase(map, "label", typeId),
+    kind: "label",
+    x,
+    y,
+    text,
+    fontSize: 14,
+  };
+}
+
+export function findPrimitive(project: Project, mapId: MapId, primitiveId: EntityId) {
+  const map = project.maps[mapId];
+  if (!map) return undefined;
+  return map.primitives.find((p) => p.id === primitiveId);
+}
+
+export function addPrimitive(project: Project, mapId: MapId, primitive: Primitive): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const type = legendTypeById(project, primitive.typeId);
+  if (!type || type.shape !== primitive.kind) {
+    throw new Error("Тип легенды не соответствует виду примитива");
+  }
+  const ts = now();
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: { ...map, updatedAt: ts, primitives: [...map.primitives, primitive] },
+    },
+  });
+}
+
+/** Смещает примитив: точку/подпись — x/y, линию/область — все точки. */
+export function movePrimitive(
+  project: Project,
+  mapId: MapId,
+  primitiveId: EntityId,
+  dx: number,
+  dy: number,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const ts = now();
+  const move = (p: Primitive): Primitive => {
+    if (p.id !== primitiveId) return p;
+    if (p.kind === "point" || p.kind === "label") {
+      return { ...p, x: p.x + dx, y: p.y + dy, updatedAt: ts };
+    }
+    return { ...p, points: p.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })), updatedAt: ts };
+  };
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: { ...map, updatedAt: ts, primitives: map.primitives.map(move) },
+    },
+  });
+}
+
+export type PrimitivePatch = Partial<{
+  name: string;
+  note: string;
+  visible: boolean;
+  locked: boolean;
+  typeId: string;
+  text: string;
+  fontSize: number;
+}>;
+
+export function updatePrimitive(
+  project: Project,
+  mapId: MapId,
+  primitiveId: EntityId,
+  patch: PrimitivePatch,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const current = map.primitives.find((p) => p.id === primitiveId);
+  if (!current) throw new Error("Примитив не найден");
+  if (patch.typeId !== undefined) {
+    const type = legendTypeById(project, patch.typeId);
+    if (!type) throw new Error("Тип легенды не найден");
+    if (type.shape !== current.kind) {
+      throw new Error(`Тип «${type.name}» не подходит: форма «${type.shape}», а примитив — «${current.kind}»`);
+    }
+  }
+  const ts = now();
+  const apply = (p: Primitive): Primitive => {
+    if (p.id !== primitiveId) return p;
+    const next = { ...p, ...patch, updatedAt: ts };
+    if (patch.name !== undefined) next.name = patch.name.trim() || p.name;
+    if (patch.text !== undefined) next.text = patch.text;
+    if (patch.fontSize !== undefined) next.fontSize = Math.max(8, Math.min(72, patch.fontSize));
+    return next;
+  };
+  // Не трогаем проект, если патч ничего не меняет (blur без изменений
+  // не должен плодить записи в журнале).
+  const nextPrimitive = apply(current);
+  const comparable = (p: Primitive) =>
+    JSON.stringify({
+      name: p.name,
+      note: p.note,
+      visible: p.visible,
+      locked: p.locked,
+      typeId: p.typeId,
+      text: p.kind === "label" ? p.text : undefined,
+      fontSize: p.kind === "label" ? p.fontSize : undefined,
+    });
+  if (comparable(nextPrimitive) === comparable(current)) return project;
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: { ...map, updatedAt: ts, primitives: map.primitives.map(apply) },
+    },
+  });
+}
+
+export function deletePrimitive(project: Project, mapId: MapId, primitiveId: EntityId): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  if (!map.primitives.some((p) => p.id === primitiveId)) return project;
+  const ts = now();
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: { ...map, updatedAt: ts, primitives: map.primitives.filter((p) => p.id !== primitiveId) },
+    },
+  });
+}
+
+/**
+ * Вставляет примитив обратно на карту (восстановление из записи истории).
+ * Атомарно: либо примитив восстановлен, либо брошена ошибка и проект
+ * не изменился. Дубликаты по id блокируются.
+ */
+export function restorePrimitiveToMap(project: Project, mapId: MapId, primitive: Primitive): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Нельзя восстановить: карта, на которой был примитив, удалена из проекта");
+  if (map.primitives.some((p) => p.id === primitive.id)) {
+    throw new Error("Такой примитив уже существует на карте");
+  }
+  const typeId = legendTypeById(project, primitive.typeId)
+    ? primitive.typeId
+    : (fallbackTypeForKind(project, primitive.kind)?.id ?? primitive.typeId);
+  const ts = now();
+  const restored: Primitive = { ...primitive, typeId, updatedAt: ts };
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: { ...map, updatedAt: ts, primitives: [...map.primitives, restored] },
+    },
+  });
+}
+
 function collectDescendants(maps: Record<MapId, MapNode>, mapId: MapId): Set<MapId> {
   const result = new Set<MapId>([mapId]);
   let changed = true;
@@ -419,6 +785,132 @@ function validateArchive(raw: unknown, where: string): ArchivedMarker[] {
   });
 }
 
+/* ---------- Легенда и примитивы: валидация с миграцией ---------- */
+
+const LEGEND_SHAPES = new Set<string>(["point", "line", "area", "label"]);
+
+/**
+ * Разбирает легенду. Файлы итерации 1 поля legend не имеют —
+ * им создаются 4 базовых типа (миграция). Битые записи пропускаются;
+ * если валидных типов нет вообще — безопасный фолбэк на базовые.
+ */
+function validateLegend(raw: unknown): LegendType[] {
+  if (raw === undefined) return createDefaultLegend();
+  if (!Array.isArray(raw)) throw new ValidationError("Легенда повреждена: это не список типов");
+  const seen = new Set<string>();
+  const result: LegendType[] = [];
+  for (const rawType of raw) {
+    if (!isRecord(rawType)) continue;
+    if (typeof rawType.id !== "string" || !rawType.id || seen.has(rawType.id)) continue;
+    if (typeof rawType.name !== "string" || !rawType.name.trim()) continue;
+    if (typeof rawType.shape !== "string" || !LEGEND_SHAPES.has(rawType.shape)) continue;
+    if (typeof rawType.color !== "string" || !rawType.color) continue;
+    const createdAt = rawType.createdAt;
+    const updatedAt = rawType.updatedAt;
+    if (typeof createdAt !== "string" || !isIsoDate(createdAt)) continue;
+    if (typeof updatedAt !== "string" || !isIsoDate(updatedAt)) continue;
+    seen.add(rawType.id);
+    const opacity =
+      typeof rawType.opacity === "number" && Number.isFinite(rawType.opacity)
+        ? Math.min(1, Math.max(0, rawType.opacity))
+        : 1;
+    const strokeWidth =
+      typeof rawType.strokeWidth === "number" && Number.isFinite(rawType.strokeWidth)
+        ? Math.min(20, Math.max(1, rawType.strokeWidth))
+        : 2;
+    result.push({
+      id: rawType.id,
+      name: rawType.name.trim(),
+      category: typeof rawType.category === "string" ? rawType.category : "",
+      shape: rawType.shape as LegendShape,
+      color: rawType.color,
+      opacity,
+      strokeWidth,
+      strokeStyle: rawType.strokeStyle === "dashed" ? "dashed" : "solid",
+      visible: rawType.visible !== false,
+      isBuiltin: rawType.isBuiltin === true,
+      createdAt,
+      updatedAt,
+    });
+  }
+  return result.length > 0 ? result : createDefaultLegend();
+}
+
+function tryValidatePrimitive(raw: unknown, legend: LegendType[]): Primitive | null {
+  try {
+    if (!isRecord(raw)) return null;
+    if (raw.kind !== "point" && raw.kind !== "line" && raw.kind !== "area" && raw.kind !== "label") {
+      return null;
+    }
+    if (typeof raw.id !== "string" || !raw.id) return null;
+    if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) return null;
+    const kind = raw.kind as PrimitiveKind;
+    const base = {
+      id: raw.id,
+      kind,
+      name:
+        typeof raw.name === "string" && raw.name.trim()
+          ? raw.name.trim()
+          : PRIMITIVE_BASE_NAME[kind],
+      note: typeof raw.note === "string" ? raw.note : "",
+      visible: raw.visible !== false,
+      locked: raw.locked === true,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+    };
+    // typeId: должен ссылаться на существующий тип той же формы;
+    // иначе — фолбэк на первый подходящий тип, а если типов такой
+    // формы нет — примитив выбрасывается (безопасно, не краш).
+    const byShape = legend.filter((t) => t.shape === kind);
+    let typeId = typeof raw.typeId === "string" ? raw.typeId : "";
+    if (!byShape.some((t) => t.id === typeId)) {
+      if (byShape.length === 0) return null;
+      typeId = byShape[0].id;
+    }
+    if (kind === "point") {
+      if (typeof raw.x !== "number" || typeof raw.y !== "number") return null;
+      return { ...base, typeId, x: raw.x, y: raw.y } as Primitive;
+    }
+    if (kind === "label") {
+      if (typeof raw.x !== "number" || typeof raw.y !== "number") return null;
+      const fontSize =
+        typeof raw.fontSize === "number" && Number.isFinite(raw.fontSize)
+          ? Math.max(8, Math.min(72, raw.fontSize))
+          : 14;
+      return {
+        ...base,
+        typeId,
+        x: raw.x,
+        y: raw.y,
+        text: typeof raw.text === "string" ? raw.text : "",
+        fontSize,
+      } as Primitive;
+    }
+    if (!Array.isArray(raw.points)) return null;
+    const points: Vec2[] = [];
+    for (const pt of raw.points) {
+      if (!isRecord(pt) || typeof pt.x !== "number" || typeof pt.y !== "number") return null;
+      points.push({ x: pt.x, y: pt.y });
+    }
+    if (kind === "line" && points.length < 2) return null;
+    if (kind === "area" && points.length < 3) return null;
+    return { ...base, typeId, points } as Primitive;
+  } catch {
+    return null;
+  }
+}
+
+function validatePrimitives(raw: unknown, legend: LegendType[], where: string): Primitive[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new ValidationError(`${where}: список примитивов повреждён`);
+  const result: Primitive[] = [];
+  for (const rawPrimitive of raw) {
+    const primitive = tryValidatePrimitive(rawPrimitive, legend);
+    if (primitive) result.push(primitive);
+  }
+  return result;
+}
+
 export function validateProject(raw: unknown): Project {
   if (!isRecord(raw)) throw new ValidationError("Файл не является проектом MapGen");
   if (raw.format !== PROJECT_FORMAT) {
@@ -440,6 +932,8 @@ export function validateProject(raw: unknown): Project {
   if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) {
     throw new ValidationError("В проекте повреждены даты");
   }
+
+  const legend = validateLegend(raw.legend);
 
   const maps: Record<MapId, MapNode> = {};
   for (const [mapId, rawMap] of Object.entries(raw.maps)) {
@@ -471,9 +965,11 @@ export function validateProject(raw: unknown): Project {
       throw new ValidationError("Корневая карта не должна иметь родителя");
     }
     map.entities = map.entities.map((e, i) => validateEntity(e, maps, `Карта «${map.name}», сущность №${i + 1}`));
+    map.primitives = validatePrimitives(map.primitives, legend, `Карта «${map.name}»`);
   }
 
   raw.markerArchive = validateArchive(raw.markerArchive, "Архив удалённых маркеров");
+  raw.legend = legend;
 
   return raw as unknown as Project;
 }

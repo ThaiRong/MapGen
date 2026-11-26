@@ -1,4 +1,4 @@
-import type { EntityId, LocationLinkEntity, MapId, Project } from "./types";
+import type { EntityId, LocationLinkEntity, MapId, Primitive, Project } from "./types";
 import { validateProject } from "./project";
 
 export type OperationType =
@@ -13,13 +13,30 @@ export type OperationType =
   | "marker.renamed"
   | "marker.moved"
   | "marker.deleted"
-  | "marker.restored";
+  | "marker.restored"
+  | "primitive.created"
+  | "primitive.moved"
+  | "primitive.updated"
+  | "primitive.deleted"
+  | "primitive.restored"
+  | "legend.created"
+  | "legend.updated"
+  | "legend.deleted";
 
-/** Данные для восстановления удалённого маркера прямо из записи истории. */
-export interface HistoryRestoreInfo {
+export interface MarkerRestoreInfo {
+  kind: "marker";
   sourceMapId: MapId;
   entity: LocationLinkEntity;
 }
+
+export interface PrimitiveRestoreInfo {
+  kind: "primitive";
+  mapId: MapId;
+  primitive: Primitive;
+}
+
+/** Данные для восстановления удалённого объекта прямо из записи истории. */
+export type HistoryRestoreInfo = MarkerRestoreInfo | PrimitiveRestoreInfo;
 
 /**
  * Одна запись журнала: что случилось, когда и в каком состоянии
@@ -168,6 +185,14 @@ const OPERATION_TYPES = new Set<string>([
   "marker.moved",
   "marker.deleted",
   "marker.restored",
+  "primitive.created",
+  "primitive.moved",
+  "primitive.updated",
+  "primitive.deleted",
+  "primitive.restored",
+  "legend.created",
+  "legend.updated",
+  "legend.deleted",
 ]);
 
 function isIsoDate(value: unknown): boolean {
@@ -192,15 +217,37 @@ function tryValidateEntry(raw: unknown): HistoryEntry | null {
     if (raw.restoreInfo !== undefined) {
       const ri = raw.restoreInfo;
       if (!isRecord(ri)) return null;
-      if (typeof ri.sourceMapId !== "string" || !ri.sourceMapId) return null;
-      const re = ri.entity;
-      if (!isRecord(re)) return null;
-      if (re.kind !== "location-link") return null;
-      if (typeof re.id !== "string" || typeof re.x !== "number" || typeof re.y !== "number") {
-        return null;
+      if (ri.kind === "primitive") {
+        // Восстановление примитива: нужны карта и сам примитив.
+        if (typeof ri.mapId !== "string" || !ri.mapId) return null;
+        const rp = ri.primitive;
+        if (!isRecord(rp)) return null;
+        if (rp.kind !== "point" && rp.kind !== "line" && rp.kind !== "area" && rp.kind !== "label") {
+          return null;
+        }
+        if (typeof rp.id !== "string" || !rp.id) return null;
+        restoreInfo = {
+          kind: "primitive",
+          mapId: ri.mapId,
+          primitive: rp as unknown as Primitive,
+        };
+      } else {
+        // Маркер. Файлы до 1.5.2 хранили restoreInfo без kind —
+        // распознаём их по наличию sourceMapId + entity.
+        if (typeof ri.sourceMapId !== "string" || !ri.sourceMapId) return null;
+        const re = ri.entity;
+        if (!isRecord(re)) return null;
+        if (re.kind !== "location-link") return null;
+        if (typeof re.id !== "string" || typeof re.x !== "number" || typeof re.y !== "number") {
+          return null;
+        }
+        if (typeof re.label !== "string" || typeof re.targetMapId !== "string") return null;
+        restoreInfo = {
+          kind: "marker",
+          sourceMapId: ri.sourceMapId,
+          entity: re as unknown as LocationLinkEntity,
+        };
       }
-      if (typeof re.label !== "string" || typeof re.targetMapId !== "string") return null;
-      restoreInfo = { sourceMapId: ri.sourceMapId, entity: re as unknown as LocationLinkEntity };
     }
     return {
       id: raw.id,

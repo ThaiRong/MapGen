@@ -1,14 +1,28 @@
 import { useEffect, useRef, useState } from "react";
-import { countChildren } from "../core/project";
-import type { MapScale } from "../core/types";
-import { useAppStore, useSelectedMarker } from "../state/store";
+import { countChildren, legendTypeById } from "../core/project";
+import type { LegendShape, MapScale } from "../core/types";
+import { useAppStore, useSelectedMarker, useSelectedPrimitive } from "../state/store";
 import ConfirmDialog from "./ConfirmDialog";
+
+const SHAPE_NAME: Record<LegendShape, string> = {
+  point: "точка",
+  line: "линия",
+  area: "область",
+  label: "подпись",
+};
 
 export default function Inspector() {
   const marker = useSelectedMarker();
+  const primitive = useSelectedPrimitive();
   return (
     <div className="inspector">
-      {marker ? <MarkerInspector key={marker.id} /> : <MapInspector />}
+      {marker ? (
+        <MarkerInspector key={marker.id} />
+      ) : primitive ? (
+        <PrimitiveInspector key={primitive.id} />
+      ) : (
+        <MapInspector />
+      )}
     </div>
   );
 }
@@ -224,6 +238,168 @@ function MarkerInspector() {
         onConfirm={() => {
           setConfirmDelete(false);
           deleteSelectedMarker();
+        }}
+        onCancel={() => setConfirmDelete(false)}
+      />
+    </>
+  );
+}
+
+function PrimitiveInspector() {
+  const primitive = useSelectedPrimitive();
+  const project = useAppStore((s) => s.project);
+  const activeMapId = useAppStore((s) => s.activeMapId);
+  const updatePrimitiveProps = useAppStore((s) => s.updatePrimitiveProps);
+  const deletePrimitiveById = useAppStore((s) => s.deletePrimitiveById);
+  const clearSelection = useAppStore((s) => s.clearSelection);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  if (!primitive) return null;
+  const suitableTypes = project.legend.filter((t) => t.shape === primitive.kind);
+  const type = legendTypeById(project, primitive.typeId);
+  const mapName = project.maps[activeMapId]?.name ?? "";
+  const kindName = SHAPE_NAME[primitive.kind];
+
+  const geometry =
+    primitive.kind === "line"
+      ? `Точек: ${primitive.points.length}`
+      : primitive.kind === "area"
+        ? `Вершин: ${primitive.points.length}`
+        : `x: ${Math.round(primitive.x)}, y: ${Math.round(primitive.y)}`;
+
+  return (
+    <>
+      <h2>Примитив ({kindName})</h2>
+      <div className="field">
+        <label>Название</label>
+        <input
+          key={`${primitive.id}:${primitive.name}`}
+          type="text"
+          defaultValue={primitive.name}
+          onBlur={(e) => updatePrimitiveProps(activeMapId, primitive.id, { name: e.target.value })}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+        />
+      </div>
+
+      <div className="field">
+        <label>Тип легенды (форма «{kindName}»)</label>
+        {suitableTypes.length === 0 ? (
+          <div className="value">Нет типов формы «{kindName}» — создайте тип в панели легенды.</div>
+        ) : (
+          <select
+            className="select"
+            value={primitive.typeId}
+            onChange={(e) => updatePrimitiveProps(activeMapId, primitive.id, { typeId: e.target.value })}
+          >
+            {suitableTypes.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+                {t.visible ? "" : " (скрыт)"}
+              </option>
+            ))}
+          </select>
+        )}
+        {type && (
+          <div className="hint">
+            Стиль: {type.color}, прозрачность {Math.round(type.opacity * 100)}%, толщина {type.strokeWidth}
+            {type.strokeStyle === "dashed" ? ", пунктир" : ""}.
+          </div>
+        )}
+      </div>
+
+      {primitive.kind === "label" && (
+        <>
+          <div className="field">
+            <label>Текст подписи</label>
+            <input
+              key={`${primitive.id}:text:${primitive.text}`}
+              type="text"
+              defaultValue={primitive.text}
+              onBlur={(e) => updatePrimitiveProps(activeMapId, primitive.id, { text: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+            />
+          </div>
+          <div className="field">
+            <label>Размер шрифта (8–72)</label>
+            <input
+              key={`${primitive.id}:font:${primitive.fontSize}`}
+              type="number"
+              min={8}
+              max={72}
+              defaultValue={primitive.fontSize}
+              onBlur={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v)) {
+                  updatePrimitiveProps(activeMapId, primitive.id, { fontSize: v });
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+            />
+          </div>
+        </>
+      )}
+
+      <div className="field">
+        <label>Геометрия на карте «{mapName}»</label>
+        <div className="value">{geometry}</div>
+      </div>
+
+      <div className="field">
+        <label>Заметка</label>
+        <textarea
+          key={`${primitive.id}:note:${primitive.note}`}
+          className="textarea"
+          rows={3}
+          defaultValue={primitive.note}
+          placeholder="Произвольная заметка мастера"
+          onBlur={(e) => updatePrimitiveProps(activeMapId, primitive.id, { note: e.target.value })}
+        />
+      </div>
+
+      <div className="field">
+        <label>
+          <input
+            type="checkbox"
+            checked={primitive.visible}
+            onChange={(e) => updatePrimitiveProps(activeMapId, primitive.id, { visible: e.target.checked })}
+          />{" "}
+          Видимый
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={primitive.locked}
+            onChange={(e) => updatePrimitiveProps(activeMapId, primitive.id, { locked: e.target.checked })}
+          />{" "}
+          Заблокирован (нельзя двигать и удалять)
+        </label>
+      </div>
+
+      <div className="buttons">
+        <button disabled={primitive.locked} onClick={() => setConfirmDelete(true)}>
+          Удалить примитив
+        </button>
+        <button onClick={clearSelection}>Снять выделение</button>
+      </div>
+      <div className="hint">
+        Удаление восстанавливается через журнал: Ctrl+Z или кнопка в панели «История».
+      </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Удалить примитив?"
+        message={`${kindName[0].toUpperCase() + kindName.slice(1)} «${primitive.name}» будет удалена с карты «${mapName}». Восстановить её можно через панель «История» или Ctrl+Z.`}
+        confirmLabel="Удалить"
+        danger
+        onConfirm={() => {
+          setConfirmDelete(false);
+          deletePrimitiveById(activeMapId, primitive.id);
         }}
         onCancel={() => setConfirmDelete(false)}
       />

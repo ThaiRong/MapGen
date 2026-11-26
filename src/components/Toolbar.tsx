@@ -1,7 +1,17 @@
 import { useState } from "react";
-import { useAppStore } from "../state/store";
+import { useAppStore, type Tool } from "../state/store";
 import ArchiveDialog from "./ArchiveDialog";
 import ConfirmDialog from "./ConfirmDialog";
+
+const TOOLS: { id: Tool; label: string; title: string }[] = [
+  { id: "select", label: "Выбор", title: "Выбор и перемещение объектов (Esc — снять выделение)" },
+  { id: "point", label: "Точка", title: "Клик по холсту ставит точку" },
+  { id: "line", label: "Линия", title: "Клики ставят точки линии; Enter, двойной клик или Esc" },
+  { id: "area", label: "Область", title: "Клики ставят вершины полигона; Enter, двойной клик, клик по первой вершине или Esc" },
+  { id: "label", label: "Подпись", title: "Клик по холсту открывает поле текста подписи" },
+  { id: "add-location", label: "Локация", title: "Клик по холсту создаёт маркер и дочернюю карту" },
+  { id: "delete", label: "Удаление", title: "Клик по объекту удаляет его" },
+];
 
 export default function Toolbar() {
   const projectTitle = useAppStore((s) => s.project.title);
@@ -19,66 +29,67 @@ export default function Toolbar() {
 
   return (
     <div className="toolbar">
-      <button
-        onClick={() => {
-          const s = useAppStore.getState();
-          if (s.projectPath || s.history.entries.length > 0) setConfirmNew(true);
-          else s.newProject();
-        }}
-      >
-        Новый проект
-      </button>
-      <button onClick={() => void store.openProject()}>Открыть…</button>
-      <button onClick={() => void store.saveProject()}>Сохранить</button>
-      <button onClick={() => void store.saveProjectAs()}>Сохранить как…</button>
+      <div className="toolbar-row">
+        <button
+          onClick={() => {
+            const s = useAppStore.getState();
+            if (s.projectPath || s.history.entries.length > 0) setConfirmNew(true);
+            else s.newProject();
+          }}
+        >
+          Новый проект
+        </button>
+        <button onClick={() => void store.openProject()}>Открыть…</button>
+        <button onClick={() => void store.saveProject()}>Сохранить</button>
+        <button onClick={() => void store.saveProjectAs()}>Сохранить как…</button>
 
-      <div className="sep" />
-      <button disabled={!canUndo} onClick={() => store.undoChange()} title="Отменить (Ctrl+Z)">
-        ↶ Отмена
-      </button>
-      <button disabled={!canRedo} onClick={() => store.redoChange()} title="Повторить (Ctrl+Y)">
-        ↷ Повтор
-      </button>
-      <button
-        onClick={() => setArchiveOpen(true)}
-        disabled={archiveCount === 0}
-        title="Архив удалённых маркеров: просмотр и восстановление"
-      >
-        Архив ({archiveCount})
-      </button>
-      <button
-        className={historyPanelOpen ? "active" : undefined}
-        onClick={() => store.toggleHistoryPanel()}
-        title="Журнал изменений проекта"
-      >
-        История
-      </button>
+        <div className="sep" />
+        <button disabled={!canUndo} onClick={() => store.undoChange()} title="Отменить (Ctrl+Z)">
+          ↶ Отмена
+        </button>
+        <button disabled={!canRedo} onClick={() => store.redoChange()} title="Повторить (Ctrl+Y)">
+          ↷ Повтор
+        </button>
+        <button
+          onClick={() => setArchiveOpen(true)}
+          disabled={archiveCount === 0}
+          title="Архив удалённых маркеров: просмотр и восстановление"
+        >
+          Архив ({archiveCount})
+        </button>
+        <button
+          className={historyPanelOpen ? "active" : undefined}
+          onClick={() => store.toggleHistoryPanel()}
+          title="Журнал изменений проекта"
+        >
+          История
+        </button>
 
-      <div className="sep" />
-      <button
-        className={tool === "select" ? "active" : undefined}
-        onClick={() => store.setTool("select")}
-      >
-        Выбор
-      </button>
-      <button
-        className={tool === "add-location" ? "active" : undefined}
-        onClick={() => store.setTool("add-location")}
-      >
-        + Добавить локацию
-      </button>
+        <input
+          className="project-title"
+          type="text"
+          defaultValue={projectTitle}
+          key={projectTitle}
+          title="Название проекта"
+          onBlur={(e) => store.renameProjectTitle(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+        />
+      </div>
 
-      <input
-        className="project-title"
-        type="text"
-        defaultValue={projectTitle}
-        key={projectTitle}
-        title="Название проекта"
-        onBlur={(e) => store.renameProjectTitle(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-        }}
-      />
+      <div className="toolbar-row">
+        {TOOLS.map((t) => (
+          <button
+            key={t.id}
+            className={tool === t.id ? "active" : undefined}
+            title={t.title}
+            onClick={() => store.setTool(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       <ConfirmDialog
         open={confirmNew}

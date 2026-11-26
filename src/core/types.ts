@@ -12,6 +12,8 @@ export interface Project {
   rootMapId: MapId;
   maps: Record<MapId, MapNode>;
   markerArchive: ArchivedMarker[];
+  /** Типы легенды на уровне проекта (итерация 2). */
+  legend: LegendType[];
   createdAt: string;
   updatedAt: string;
 }
@@ -46,6 +48,8 @@ export interface MapNode {
   parentId: MapId | null;
   scale?: MapScale;
   entities: Entity[];
+  /** Нарисованные вручную примитивы (итерация 2). */
+  primitives: Primitive[];
   view?: MapView;
   createdAt: string;
   updatedAt: string;
@@ -60,6 +64,81 @@ export interface LocationLinkEntity {
   y: number;
   label: string;
   targetMapId: MapId;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ---------- Примитивы (итерация 2) ---------- */
+
+export type PrimitiveKind = "point" | "line" | "area" | "label";
+export type LegendShape = PrimitiveKind;
+
+export interface Vec2 {
+  x: number;
+  y: number;
+}
+
+interface PrimitiveBase {
+  id: EntityId;
+  kind: PrimitiveKind;
+  name: string;
+  /** Ссылка на тип легенды. */
+  typeId: string;
+  /** Произвольная заметка мастера. */
+  note: string;
+  visible: boolean;
+  locked: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PointPrimitive extends PrimitiveBase {
+  kind: "point";
+  x: number;
+  y: number;
+}
+
+export interface LinePrimitive extends PrimitiveBase {
+  kind: "line";
+  /** Минимум 2 точки; линия не обязана быть замкнутой. */
+  points: Vec2[];
+}
+
+export interface AreaPrimitive extends PrimitiveBase {
+  kind: "area";
+  /** Минимум 3 вершины; область — замкнутый полигон. */
+  points: Vec2[];
+}
+
+export interface LabelPrimitive extends PrimitiveBase {
+  kind: "label";
+  x: number;
+  y: number;
+  text: string;
+  fontSize: number;
+}
+
+export type Primitive = PointPrimitive | LinePrimitive | AreaPrimitive | LabelPrimitive;
+
+/* ---------- Легенда (итерация 2) ---------- */
+
+export type StrokeStyleKind = "solid" | "dashed";
+
+/** Тип легенды: нейтральный стиль, который пользователь присваивает примитивам. */
+export interface LegendType {
+  id: string;
+  name: string;
+  category: string;
+  shape: LegendShape;
+  color: string;
+  /** 0..1 */
+  opacity: number;
+  strokeWidth: number;
+  strokeStyle: StrokeStyleKind;
+  visible: boolean;
+  /** Базовые типы защищены: нельзя менять форму, можно удалить только
+   *  при ненулевом остаточном покрытии формы (см. core/project.ts). */
+  isBuiltin: boolean;
   createdAt: string;
   updatedAt: string;
 }

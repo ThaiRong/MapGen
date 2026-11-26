@@ -3,6 +3,7 @@ import { useAppStore } from "./state/store";
 import Toolbar from "./components/Toolbar";
 import Breadcrumbs from "./components/Breadcrumbs";
 import TreePanel from "./components/TreePanel";
+import LegendPanel from "./components/LegendPanel";
 import CanvasView from "./components/CanvasView";
 import HistoryPanel from "./components/HistoryPanel";
 import Inspector from "./components/Inspector";
@@ -20,6 +21,7 @@ export default function App() {
         !!target &&
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
           target.isContentEditable);
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
@@ -33,11 +35,44 @@ export default function App() {
         useAppStore.getState().redoChange();
         return;
       }
-      if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
-        const { selectedEntityId, deleteSelectedMarker } = useAppStore.getState();
-        if (selectedEntityId) {
+      if (typing) return;
+
+      if (e.key === "Enter") {
+        const s = useAppStore.getState();
+        if (s.drawingDraft) {
           e.preventDefault();
-          deleteSelectedMarker();
+          s.finishDrawing();
+        }
+        return;
+      }
+      if (e.key === "Escape") {
+        const s = useAppStore.getState();
+        if (s.labelDraft) {
+          e.preventDefault();
+          s.cancelLabelDraft();
+          return;
+        }
+        if (s.drawingDraft) {
+          e.preventDefault();
+          s.cancelDrawing();
+          return;
+        }
+        if (s.selectedEntityId || s.selectedPrimitiveId) {
+          e.preventDefault();
+          s.clearSelection();
+        }
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const s = useAppStore.getState();
+        if (s.selectedPrimitiveId) {
+          e.preventDefault();
+          s.deletePrimitiveById(s.activeMapId, s.selectedPrimitiveId);
+          return;
+        }
+        if (s.selectedEntityId) {
+          e.preventDefault();
+          s.deleteSelectedMarker();
         }
       }
     };
@@ -52,7 +87,10 @@ export default function App() {
         <Breadcrumbs />
       </header>
       <div className="app-body">
-        <TreePanel />
+        <div className="left-column">
+          <TreePanel />
+          <LegendPanel />
+        </div>
         <CanvasView />
         <HistoryPanel />
         <Inspector />
