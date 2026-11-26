@@ -66,18 +66,30 @@ export default function LegendPanel() {
       </ul>
 
       {selected && (
-        <LegendTypeEditor
-          key={selected.id}
-          typeId={selected.id}
-          usage={countLegendTypeUsage(project, selected.id)}
-          sameShapeCount={legend.filter((t) => t.shape === selected.shape).length}
-        />
+        <div className="legend-editor">
+          <div className="legend-editor-header">
+            <span>Редактирование типа</span>
+            <button
+              className="mini"
+              title="Свернуть редактор (Esc)"
+              onClick={() => selectLegendType(null)}
+            >
+              ✕ Свернуть
+            </button>
+          </div>
+          <LegendTypeEditorBody
+            key={selected.id}
+            typeId={selected.id}
+            usage={countLegendTypeUsage(project, selected.id)}
+            sameShapeCount={legend.filter((t) => t.shape === selected.shape).length}
+          />
+        </div>
       )}
     </div>
   );
 }
 
-function LegendTypeEditor({
+function LegendTypeEditorBody({
   typeId,
   usage,
   sameShapeCount,
@@ -99,7 +111,7 @@ function LegendTypeEditor({
         : null;
 
   return (
-    <div className="legend-editor">
+    <div className="legend-editor-body">
       <div className="field">
         <label>Название</label>
         <input

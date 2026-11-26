@@ -74,6 +74,11 @@ export default function App() {
           s.cancelDrawing();
           return;
         }
+        if (s.selectedTypeId) {
+          e.preventDefault();
+          s.selectLegendType(null);
+          return;
+        }
         if (s.selectedEntityId || s.selectedPrimitiveId) {
           e.preventDefault();
           s.clearSelection();
