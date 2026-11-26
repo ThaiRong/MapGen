@@ -2,6 +2,7 @@ import {
   addLegendType,
   addLocation,
   addPrimitive,
+  clearMarkerArchive,
   countLegendTypeUsage,
   createAreaPrimitive,
   createDefaultLegend,
@@ -9,6 +10,7 @@ import {
   createLinePrimitive,
   createPointPrimitive,
   createProject,
+  deleteArchivedMarker,
   deleteLegendType,
   deleteMap,
   deleteMarker,
@@ -611,6 +613,45 @@ assert(
   roundTrip.project.maps[pl.rootMapId].primitives.length === pl.maps[pl.rootMapId].primitives.length,
   "примитивы переживают сохранение",
 );
+
+// 31. Управление архивом: удаление записей и очистка
+let pa = createProject("Архив-управление");
+const locA1 = addLocation(pa, pa.rootMapId, 1, 1);
+pa = locA1.project;
+const locA2 = addLocation(pa, pa.rootMapId, 2, 2);
+pa = locA2.project;
+pa = deleteMarker(pa, pa.rootMapId, locA1.entityId);
+pa = deleteMarker(pa, pa.rootMapId, locA2.entityId);
+assert(pa.markerArchive.length === 2, "в архиве две записи");
+pa = deleteArchivedMarker(pa, locA1.entityId);
+assert(pa.markerArchive.length === 1, "запись удалена из архива по одной");
+assert(!pa.maps[pa.rootMapId].entities.some((e) => e.id === locA1.entityId), "маркер при этом на карту не вернулся");
+try {
+  deleteArchivedMarker(pa, locA1.entityId);
+  assert(false, "повторное удаление той же записи должно бросить ошибку");
+} catch {
+  assert(true, "отсутствующая запись — понятная ошибка");
+}
+const paBeforeClear = pa;
+pa = clearMarkerArchive(pa);
+assert(pa.markerArchive.length === 0, "архив очищен полностью");
+assert(clearMarkerArchive(pa) === pa, "очистка пустого архива — no-op");
+assert(pa.maps[pa.rootMapId].entities.length === 0, "очистка архива не трогает карту");
+void paBeforeClear;
+
+// 32. Размер шрифта подписи: кламп 8–72
+let pf = createProject("Шрифт подписи");
+const lf = addLocation(pf, pf.rootMapId, 0, 0);
+pf = lf.project;
+const labelFontType = pf.legend.find((t) => t.shape === "label")!;
+const labelP = createLabelPrimitive(pf.maps[pf.rootMapId], labelFontType.id, 5, 5, "Большая");
+pf = addPrimitive(pf, pf.rootMapId, labelP);
+pf = updatePrimitive(pf, pf.rootMapId, labelP.id, { fontSize: 500 });
+const labelBig = pf.maps[pf.rootMapId].primitives.find((p) => p.id === labelP.id)!;
+assert(labelBig.kind === "label" && labelBig.fontSize === 72, "fontSize ограничен сверху (72)");
+pf = updatePrimitive(pf, pf.rootMapId, labelP.id, { fontSize: 1 });
+const labelSmall = pf.maps[pf.rootMapId].primitives.find((p) => p.id === labelP.id)!;
+assert(labelSmall.kind === "label" && labelSmall.fontSize === 8, "fontSize ограничен снизу (8)");
 
 // 18. Сериализация сохраняет архив; старые файлы без архива читаются
 const text2 = serializeProject(p);

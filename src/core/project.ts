@@ -305,6 +305,26 @@ export function restoreMarkerFromRecord(
   };
 }
 
+/**
+ * Удаляет запись из архива удалённых маркеров без восстановления
+ * маркера. Сам маркер при этом не возвращается на карту.
+ */
+export function deleteArchivedMarker(project: Project, archivedEntityId: EntityId): Project {
+  if (!project.markerArchive.some((a) => a.entity.id === archivedEntityId)) {
+    throw new Error("Запись не найдена в архиве");
+  }
+  return touch({
+    ...project,
+    markerArchive: project.markerArchive.filter((a) => a.entity.id !== archivedEntityId),
+  });
+}
+
+/** Полностью очищает архив удалённых маркеров. */
+export function clearMarkerArchive(project: Project): Project {
+  if (project.markerArchive.length === 0) return project;
+  return touch({ ...project, markerArchive: [] });
+}
+
 export function deleteMap(project: Project, mapId: MapId): Project {
   if (mapId === project.rootMapId) throw new Error("Корневую карту нельзя удалить");
   if (!project.maps[mapId]) return project;

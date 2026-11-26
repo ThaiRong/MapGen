@@ -3,11 +3,13 @@ import {
   addLegendType,
   addLocation,
   addPrimitive,
+  clearMarkerArchive,
   createAreaPrimitive,
   createLabelPrimitive,
   createLinePrimitive,
   createPointPrimitive,
   createProject,
+  deleteArchivedMarker,
   deleteLegendType,
   deleteMap,
   deleteMarker,
@@ -146,6 +148,7 @@ export interface AppState {
   finishDrawing: () => void;
   cancelDrawing: () => void;
   movePrimitiveBy: (primitiveId: EntityId, dx: number, dy: number) => void;
+  adjustLabelFontSize: (primitiveId: EntityId, delta: number) => void;
   updatePrimitiveProps: (mapId: MapId, primitiveId: EntityId, patch: PrimitivePatch) => void;
   deletePrimitiveById: (mapId: MapId, primitiveId: EntityId) => void;
   restorePrimitiveFromHistory: (entryId: string) => void;
@@ -159,6 +162,8 @@ export interface AppState {
   deleteSelectedMarker: () => void;
   deleteMarkerAt: (mapId: MapId, entityId: EntityId) => void;
   restoreArchivedMarker: (archivedEntityId: EntityId) => void;
+  deleteArchivedMarkerById: (archivedEntityId: EntityId) => void;
+  clearArchive: () => void;
   restoreMarkerFromHistory: (entryId: string) => void;
   deleteMapById: (mapId: MapId) => void;
   setScale: (mapId: MapId, scale: MapScale | undefined) => void;
@@ -512,6 +517,24 @@ export const useAppStore = create<AppState>()((set, get) => {
       );
     },
 
+    adjustLabelFontSize: (primitiveId, delta) => {
+      const { project, activeMapId } = get();
+      const primitive = findPrimitive(project, activeMapId, primitiveId);
+      if (!primitive || primitive.kind !== "label") return;
+      const next = Math.max(8, Math.min(72, primitive.fontSize + delta));
+      if (next === primitive.fontSize) return;
+      apply(
+        updatePrimitive(project, activeMapId, primitiveId, { fontSize: next }),
+        {
+          operationType: "primitive.updated",
+          description: `Подпись «${displayNameOf(primitive)}»: размер шрифта ${next}px`,
+          mapId: activeMapId,
+          entityId: primitiveId,
+          coalesceKey: `label-fontsize:${primitiveId}`,
+        },
+      );
+    },
+
     updatePrimitiveProps: (mapId, primitiveId, patch) => {
       const { project } = get();
       const current = findPrimitive(project, mapId, primitiveId);
@@ -722,6 +745,42 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     deleteMarkerAt: (mapId, entityId) => {
       deleteMarkerWithHistory(mapId, entityId);
+    },
+
+    deleteArchivedMarkerById: (archivedEntityId) => {
+      const { project } = get();
+      const entry = project.markerArchive.find((a) => a.entity.id === archivedEntityId);
+      if (!entry) return;
+      try {
+        apply(
+          deleteArchivedMarker(project, archivedEntityId),
+          {
+            operationType: "archive.entryDeleted",
+            description: `Запись архива «${entry.entity.label}» удалена`,
+            entityId: archivedEntityId,
+          },
+          `Запись «${entry.entity.label}» удалена из архива`,
+        );
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось удалить запись архива" });
+      }
+    },
+
+    clearArchive: () => {
+      const { project } = get();
+      const count = project.markerArchive.length;
+      if (count === 0) {
+        set({ status: "Архив уже пуст" });
+        return;
+      }
+      apply(
+        clearMarkerArchive(project),
+        {
+          operationType: "archive.cleared",
+          description: `Архив удалённых маркеров очищен (${count})`,
+        },
+        `Архив очищен: удалено записей — ${count}`,
+      );
     },
 
     restoreArchivedMarker: (archivedEntityId) => {

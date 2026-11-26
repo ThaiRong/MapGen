@@ -37,6 +37,23 @@ export default function App() {
       }
       if (typing) return;
 
+      if (!e.ctrlKey && !e.metaKey && (e.key === "+" || e.key === "=")) {
+        const s = useAppStore.getState();
+        if (s.selectedPrimitiveId) {
+          e.preventDefault();
+          s.adjustLabelFontSize(s.selectedPrimitiveId, 2);
+        }
+        return;
+      }
+      if (!e.ctrlKey && !e.metaKey && (e.key === "-" || e.key === "_")) {
+        const s = useAppStore.getState();
+        if (s.selectedPrimitiveId) {
+          e.preventDefault();
+          s.adjustLabelFontSize(s.selectedPrimitiveId, -2);
+        }
+        return;
+      }
+
       if (e.key === "Enter") {
         const s = useAppStore.getState();
         if (s.drawingDraft) {

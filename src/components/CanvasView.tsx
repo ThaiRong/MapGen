@@ -131,6 +131,10 @@ export default function CanvasView() {
         }
       }
       const tolWorld = HIT_RADIUS / view.zoom;
+      const clickScreen = {
+        x: (world.x - view.centerX) * view.zoom + w / 2,
+        y: (world.y - view.centerY) * view.zoom + h / 2,
+      };
       const byKind = (kind: Primitive["kind"]) =>
         map.primitives.filter((p) => p.kind === kind);
       const visibleType = (p: Primitive) => {
@@ -140,7 +144,19 @@ export default function CanvasView() {
       // Порядок выбора — обратный порядку отрисовки: подписи, точки, линии, области.
       for (const p of [...byKind("label")].reverse()) {
         if (!visibleType(p)) continue;
-        if (p.kind === "label" && Math.hypot(p.x - world.x, p.y - world.y) <= tolWorld) {
+        if (p.kind !== "label") continue;
+        // Клик по габаритам текста, а не только по точке-якорю:
+        // якорь — центр строки, промах по краю текста больше не мешает.
+        const anchor = {
+          x: (p.x - view.centerX) * view.zoom + w / 2,
+          y: (p.y - view.centerY) * view.zoom + h / 2,
+        };
+        const halfW = Math.max(HIT_RADIUS, p.text.length * p.fontSize * 0.3);
+        const halfH = Math.max(HIT_RADIUS, p.fontSize * 0.7);
+        if (
+          Math.abs(clickScreen.x - anchor.x) <= halfW &&
+          Math.abs(clickScreen.y - anchor.y) <= halfH
+        ) {
           return { type: "primitive", primitive: p };
         }
       }

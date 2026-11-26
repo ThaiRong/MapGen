@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { useAppStore } from "../state/store";
+import ConfirmDialog from "./ConfirmDialog";
 
 interface ArchiveDialogProps {
   open: boolean;
@@ -8,15 +10,21 @@ interface ArchiveDialogProps {
 /**
  * Архив удалённых маркеров. Восстановление возвращает маркер
  * на прежние координаты и вновь связывает с целевой картой.
- * Записи с удалённой целевой или исходной картой помечаются
- * и не восстанавливаются — с причиной, понятной пользователю.
+ * Записи можно удалять по одной или очистить архив целиком —
+ * маркер при этом не возвращается на карту.
  */
 export default function ArchiveDialog({ open, onClose }: ArchiveDialogProps) {
   const archive = useAppStore((s) => s.project.markerArchive);
   const maps = useAppStore((s) => s.project.maps);
   const restore = useAppStore((s) => s.restoreArchivedMarker);
+  const deleteEntry = useAppStore((s) => s.deleteArchivedMarkerById);
+  const clearArchive = useAppStore((s) => s.clearArchive);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   if (!open) return null;
+
+  const deleteCandidate = archive.find((a) => a.entity.id === confirmDeleteId) ?? null;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -49,22 +57,61 @@ export default function ArchiveDialog({ open, onClose }: ArchiveDialogProps) {
                     </span>
                     {reason && <span className="archive-warn">{reason}</span>}
                   </div>
-                  <button
-                    disabled={reason !== null}
-                    title={reason ?? "Вернуть маркер на прежнее место"}
-                    onClick={() => restore(entry.entity.id)}
-                  >
-                    Восстановить
-                  </button>
+                  <div className="archive-actions">
+                    <button
+                      disabled={reason !== null}
+                      title={reason ?? "Вернуть маркер на прежнее место"}
+                      onClick={() => restore(entry.entity.id)}
+                    >
+                      Восстановить
+                    </button>
+                    <button
+                      className="danger"
+                      title="Удалить запись из архива (маркер на карту не вернётся)"
+                      onClick={() => setConfirmDeleteId(entry.entity.id)}
+                    >
+                      Удалить
+                    </button>
+                  </div>
                 </li>
               );
             })}
           </ul>
         )}
         <div className="modal-buttons">
+          {archive.length > 0 && (
+            <button className="danger" onClick={() => setConfirmClear(true)}>
+              Очистить архив
+            </button>
+          )}
           <button onClick={onClose}>Закрыть</button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deleteCandidate !== null}
+        title="Удалить запись из архива?"
+        message={`Запись «${deleteCandidate?.entity.label ?? ""}» будет удалена без восстановления маркера. Если этот маркер удалялся недавно, его всё ещё можно вернуть через панель «История». Действие можно отменить через Ctrl+Z.`}
+        confirmLabel="Удалить запись"
+        danger
+        onConfirm={() => {
+          if (deleteCandidate) deleteEntry(deleteCandidate.entity.id);
+          setConfirmDeleteId(null);
+        }}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
+      <ConfirmDialog
+        open={confirmClear}
+        title="Очистить архив?"
+        message={`Все ${archive.length} записей архива будут удалены без восстановления маркеров. Действие можно отменить через Ctrl+Z.`}
+        confirmLabel="Очистить архив"
+        danger
+        onConfirm={() => {
+          setConfirmClear(false);
+          clearArchive();
+        }}
+        onCancel={() => setConfirmClear(false)}
+      />
     </div>
   );
 }

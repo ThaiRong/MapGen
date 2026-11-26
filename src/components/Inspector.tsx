@@ -252,6 +252,7 @@ function PrimitiveInspector() {
   const updatePrimitiveProps = useAppStore((s) => s.updatePrimitiveProps);
   const deletePrimitiveById = useAppStore((s) => s.deletePrimitiveById);
   const clearSelection = useAppStore((s) => s.clearSelection);
+  const adjustLabelFontSize = useAppStore((s) => s.adjustLabelFontSize);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (!primitive) return null;
@@ -325,22 +326,39 @@ function PrimitiveInspector() {
           </div>
           <div className="field">
             <label>Размер шрифта (8–72)</label>
-            <input
-              key={`${primitive.id}:font:${primitive.fontSize}`}
-              type="number"
-              min={8}
-              max={72}
-              defaultValue={primitive.fontSize}
-              onBlur={(e) => {
-                const v = Number(e.target.value);
-                if (Number.isFinite(v)) {
-                  updatePrimitiveProps(activeMapId, primitive.id, { fontSize: v });
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              }}
-            />
+            <div className="row">
+              <button
+                title="Уменьшить (−)"
+                disabled={primitive.fontSize <= 8}
+                onClick={() => adjustLabelFontSize(primitive.id, -2)}
+              >
+                −
+              </button>
+              <input
+                key={`${primitive.id}:font:${primitive.fontSize}`}
+                type="number"
+                min={8}
+                max={72}
+                defaultValue={primitive.fontSize}
+                onBlur={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v)) {
+                    updatePrimitiveProps(activeMapId, primitive.id, { fontSize: v });
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+              />
+              <button
+                title="Увеличить (+)"
+                disabled={primitive.fontSize >= 72}
+                onClick={() => adjustLabelFontSize(primitive.id, 2)}
+              >
+                +
+              </button>
+            </div>
+            <div className="hint">Или выберите подпись и жмите + / −.</div>
           </div>
         </>
       )}
