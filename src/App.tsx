@@ -37,19 +37,49 @@ export default function App() {
       }
       if (typing) return;
 
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+        const s = useAppStore.getState();
+        if (s.selectedPrimitiveIds.length === 1) {
+          e.preventDefault();
+          s.copySelectedPrimitive();
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        useAppStore.getState().pastePrimitive();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        const s = useAppStore.getState();
+        if (s.selectedPrimitiveIds.length === 1) {
+          e.preventDefault();
+          s.duplicateSelectedPrimitive();
+        }
+        return;
+      }
+
       if (!e.ctrlKey && !e.metaKey && (e.key === "+" || e.key === "=")) {
         const s = useAppStore.getState();
-        if (s.selectedPrimitiveId) {
-          e.preventDefault();
-          s.adjustLabelFontSize(s.selectedPrimitiveId, 2);
+        if (s.selectedPrimitiveIds.length === 1) {
+          const map = s.project.maps[s.activeMapId];
+          const p = map?.primitives.find((x) => x.id === s.selectedPrimitiveIds[0]);
+          if (p?.kind === "label") {
+            e.preventDefault();
+            s.adjustLabelFontSize(p.id, 2);
+          }
         }
         return;
       }
       if (!e.ctrlKey && !e.metaKey && (e.key === "-" || e.key === "_")) {
         const s = useAppStore.getState();
-        if (s.selectedPrimitiveId) {
-          e.preventDefault();
-          s.adjustLabelFontSize(s.selectedPrimitiveId, -2);
+        if (s.selectedPrimitiveIds.length === 1) {
+          const map = s.project.maps[s.activeMapId];
+          const p = map?.primitives.find((x) => x.id === s.selectedPrimitiveIds[0]);
+          if (p?.kind === "label") {
+            e.preventDefault();
+            s.adjustLabelFontSize(p.id, -2);
+          }
         }
         return;
       }
@@ -79,7 +109,7 @@ export default function App() {
           s.selectLegendType(null);
           return;
         }
-        if (s.selectedEntityId || s.selectedPrimitiveId) {
+        if (s.selectedEntityId || s.selectedPrimitiveIds.length > 0) {
           e.preventDefault();
           s.clearSelection();
         }
@@ -87,9 +117,9 @@ export default function App() {
       }
       if (e.key === "Delete" || e.key === "Backspace") {
         const s = useAppStore.getState();
-        if (s.selectedPrimitiveId) {
+        if (s.selectedPrimitiveIds.length > 0) {
           e.preventDefault();
-          s.deletePrimitiveById(s.activeMapId, s.selectedPrimitiveId);
+          s.deleteSelectedPrimitives();
           return;
         }
         if (s.selectedEntityId) {

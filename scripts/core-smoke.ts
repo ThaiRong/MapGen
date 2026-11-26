@@ -17,12 +17,19 @@ import {
   deletePrimitive,
   moveMarker,
   movePrimitive,
+  movePrimitives,
+  primitiveCenter,
   renameMap,
   renameMarker,
   restoreMarker,
   restoreMarkerEntity,
   restoreMarkerFromRecord,
   restorePrimitiveToMap,
+  rotatePrimitive,
+  insertPrimitiveCopy,
+  deletePrimitives,
+  movePrimitiveVertex,
+  insertPrimitiveVertex,
   setMapScale,
   setMapView,
   updateLegendType,
@@ -652,6 +659,90 @@ assert(labelBig.kind === "label" && labelBig.fontSize === 72, "fontSize огра
 pf = updatePrimitive(pf, pf.rootMapId, labelP.id, { fontSize: 1 });
 const labelSmall = pf.maps[pf.rootMapId].primitives.find((p) => p.id === labelP.id)!;
 assert(labelSmall.kind === "label" && labelSmall.fontSize === 8, "fontSize ограничен снизу (8)");
+
+// 33. Поворот, копирование, пакетное перемещение/удаление
+let pr = createProject("Поворот");
+const lr = addLocation(pr, pr.rootMapId, 0, 0);
+pr = lr.project;
+const rLineType = pr.legend.find((t) => t.shape === "line")!;
+const rLine = createLinePrimitive(
+  pr.maps[pr.rootMapId],
+  rLineType.id,
+  [{ x: 0, y: 0 }, { x: 100, y: 0 }],
+);
+pr = addPrimitive(pr, pr.rootMapId, rLine);
+// центр bbox = (50, 0); поворот на 90° вокруг центра
+pr = rotatePrimitive(pr, pr.rootMapId, rLine.id, Math.PI / 2);
+const rLineRot = pr.maps[pr.rootMapId].primitives.find((p) => p.id === rLine.id)!;
+assert(rLineRot.kind === "line", "повёрнутая линия на месте");
+if (rLineRot.kind === "line") {
+  const xs = rLineRot.points.map((p) => Math.round(p.x));
+  const ys = rLineRot.points.map((p) => Math.round(p.y));
+  assert(xs.every((x) => x === 50) && ys.includes(-50) && ys.includes(50), "поворот 90° вокруг центра bbox");
+}
+// поворот точки запрещён
+const rPoint = createPointPrimitive(pr.maps[pr.rootMapId], pr.legend.find((t) => t.shape === "point")!.id, 5, 5);
+pr = addPrimitive(pr, pr.rootMapId, rPoint);
+try {
+  rotatePrimitive(pr, pr.rootMapId, rPoint.id, 1);
+  assert(false, "поворот точки должен бросить ошибку");
+} catch {
+  assert(true, "поворот только для линий и областей");
+}
+// копирование: новый id, имя со счётчиком, смещение, свойства сохранены
+const copyRes = insertPrimitiveCopy(pr, pr.rootMapId, rLineRot, { x: 20, y: 20 });
+pr = copyRes.project;
+const rCopy = pr.maps[pr.rootMapId].primitives.find((p) => p.id === copyRes.primitiveId)!;
+assert(rCopy.id !== rLineRot.id && rCopy.name === "Линия 2", "копия: новый id и имя");
+assert(
+  rCopy.kind === "line" && rCopy.points[0].x === rLineRot.points[0].x + 20,
+  "копия: геометрия смещена",
+);
+// пакетное перемещение — оба примитива
+pr = movePrimitives(pr, pr.rootMapId, [rLine.id, copyRes.primitiveId], 10, 0);
+const movedLine = pr.maps[pr.rootMapId].primitives.find((p) => p.id === rLine.id)!;
+const movedCopy = pr.maps[pr.rootMapId].primitives.find((p) => p.id === copyRes.primitiveId)!;
+assert(
+  (movedLine.kind === "line" ? movedLine.points[0].x : 0) === (rLineRot.kind === "line" ? rLineRot.points[0].x + 10 : 0) &&
+  (movedCopy.kind === "line" ? movedCopy.points[0].x : 0) === (rCopy.kind === "line" ? rCopy.points[0].x + 10 : 0),
+  "пакетное перемещение: оба примитива смещены",
+);
+// пакетное удаление
+const beforeBatch = pr.maps[pr.rootMapId].primitives.length;
+pr = deletePrimitives(pr, pr.rootMapId, [rLine.id, copyRes.primitiveId]);
+assert(
+  pr.maps[pr.rootMapId].primitives.length === beforeBatch - 2,
+  "пакетное удаление: оба примитива удалены одной транзакцией",
+);
+
+// 34. Редактирование вершин: перемещение и вставка
+const editLine = createLinePrimitive(
+  pr.maps[pr.rootMapId],
+  rLineType.id,
+  [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }],
+);
+pr = addPrimitive(pr, pr.rootMapId, editLine);
+pr = movePrimitiveVertex(pr, pr.rootMapId, editLine.id, 1, 10, 50);
+const editLineMoved = pr.maps[pr.rootMapId].primitives.find((p) => p.id === editLine.id)!;
+assert(
+  editLineMoved.kind === "line" && editLineMoved.points[1].x === 10 && editLineMoved.points[1].y === 50,
+  "вершина линии перемещена",
+);
+pr = insertPrimitiveVertex(pr, pr.rootMapId, editLine.id, 0, { x: 5, y: -5 });
+const editLineInsert = pr.maps[pr.rootMapId].primitives.find((p) => p.id === editLine.id)!;
+assert(
+  editLineInsert.kind === "line" &&
+    editLineInsert.points.length === 4 &&
+    editLineInsert.points[1].x === 5 &&
+    editLineInsert.points[1].y === -5,
+  "вершина вставлена в сегмент двойным кликом",
+);
+try {
+  movePrimitiveVertex(pr, pr.rootMapId, editLine.id, 99, 0, 0);
+  assert(false, "перемещение несуществующей вершины должно бросить ошибку");
+} catch {
+  assert(true, "проверка индекса вершины");
+}
 
 // 18. Сериализация сохраняет архив; старые файлы без архива читаются
 const text2 = serializeProject(p);

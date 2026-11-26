@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { useAppStore, type Tool } from "../state/store";
 import ArchiveDialog from "./ArchiveDialog";
+import PrimitivesDialog from "./PrimitivesDialog";
 import ConfirmDialog from "./ConfirmDialog";
 
 const TOOLS: { id: Tool; label: string; title: string }[] = [
-  { id: "select", label: "Выбор", title: "Выбор и перемещение объектов (Esc — снять выделение)" },
+  { id: "select", label: "Выбор", title: "Выбор и перемещение объектов; рамка — мультивыделение; Shift+клик — добавить к выбору; Esc — снять выделение" },
   { id: "point", label: "Точка", title: "Клик по холсту ставит точку" },
   { id: "line", label: "Линия", title: "Клики ставят точки линии; Enter, двойной клик или Esc" },
   { id: "area", label: "Область", title: "Клики ставят вершины полигона; Enter, двойной клик, клик по первой вершине или Esc" },
+  { id: "pen", label: "Перо", title: "Свободное рисование линии (как в Paint): зажмите и ведите; Esc — отменить" },
   { id: "label", label: "Подпись", title: "Клик по холсту открывает поле текста подписи" },
   { id: "add-location", label: "Локация", title: "Клик по холсту создаёт маркер и дочернюю карту" },
   { id: "delete", label: "Удаление", title: "Клик по объекту удаляет его" },
@@ -20,10 +22,15 @@ export default function Toolbar() {
     (s) => s.history.position < s.history.entries.length - 1,
   );
   const archiveCount = useAppStore((s) => s.project.markerArchive.length);
+  const primitiveCount = useAppStore(
+    (s) => s.project.maps[s.activeMapId]?.primitives.length ?? 0,
+  );
+  const canPaste = useAppStore((s) => s.clipboard !== null);
   const historyPanelOpen = useAppStore((s) => s.historyPanelOpen);
   const tool = useAppStore((s) => s.tool);
   const [confirmNew, setConfirmNew] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [primitivesOpen, setPrimitivesOpen] = useState(false);
 
   const store = useAppStore.getState();
 
@@ -56,6 +63,20 @@ export default function Toolbar() {
           title="Архив удалённых маркеров: просмотр и восстановление"
         >
           Архив ({archiveCount})
+        </button>
+        <button
+          onClick={() => setPrimitivesOpen(true)}
+          disabled={primitiveCount === 0}
+          title="Список примитивов активной карты: выбор и видимость"
+        >
+          Примитивы ({primitiveCount})
+        </button>
+        <button
+          onClick={() => store.pastePrimitive()}
+          disabled={!canPaste}
+          title="Вставить копию примитива (Ctrl+V)"
+        >
+          Вставить
         </button>
         <button
           className={historyPanelOpen ? "active" : undefined}
@@ -104,6 +125,7 @@ export default function Toolbar() {
         onCancel={() => setConfirmNew(false)}
       />
       <ArchiveDialog open={archiveOpen} onClose={() => setArchiveOpen(false)} />
+      <PrimitivesDialog open={primitivesOpen} onClose={() => setPrimitivesOpen(false)} />
     </div>
   );
 }

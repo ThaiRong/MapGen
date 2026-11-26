@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import {
   addLegendType,
   addLocation,
@@ -14,11 +15,16 @@ import {
   deleteMap,
   deleteMarker,
   deletePrimitive,
+  deletePrimitives,
   fallbackTypeForKind,
   findPrimitive,
+  insertPrimitiveCopy,
   legendTypeById,
   moveMarker,
   movePrimitive,
+  movePrimitives,
+  movePrimitiveVertex,
+  insertPrimitiveVertex,
   NEW_LOCATION_NAME,
   renameMap,
   renameMarker,
@@ -26,6 +32,7 @@ import {
   restoreMarker,
   restoreMarkerFromRecord,
   restorePrimitiveToMap,
+  rotatePrimitive,
   setMapScale,
   setMapView,
   updateLegendType,
@@ -64,11 +71,12 @@ export type Tool =
   | "point"
   | "line"
   | "area"
+  | "pen"
   | "label"
   | "delete";
 
 export interface DrawingDraft {
-  kind: "line" | "area";
+  kind: "line" | "area" | "pen";
   points: Vec2[];
 }
 
@@ -83,7 +91,7 @@ function sanitize(
   project: Project,
   activeMapId: MapId,
   selectedEntityId: EntityId | null,
-  selectedPrimitiveId: EntityId | null,
+  selectedPrimitiveIds: EntityId[],
 ) {
   const active = project.maps[activeMapId] ? activeMapId : project.rootMapId;
   let selected = selectedEntityId;
@@ -91,12 +99,18 @@ function sanitize(
     const map = project.maps[active];
     if (!map || !map.entities.some((e) => e.id === selected)) selected = null;
   }
-  let selectedPrimitive = selectedPrimitiveId;
-  if (selectedPrimitive) {
+  let selectedPrimitives = selectedPrimitiveIds;
+  if (selectedPrimitives.length > 0) {
     const map = project.maps[active];
-    if (!map || !map.primitives.some((p) => p.id === selectedPrimitive)) selectedPrimitive = null;
+    if (!map) {
+      selectedPrimitives = [];
+    } else {
+      selectedPrimitives = selectedPrimitives.filter((id) =>
+        map.primitives.some((p) => p.id === id),
+      );
+    }
   }
-  return { activeMapId: active, selectedEntityId: selected, selectedPrimitiveId: selectedPrimitive };
+  return { activeMapId: active, selectedEntityId: selected, selectedPrimitiveIds: selectedPrimitives };
 }
 
 function positionDescription(history: ProjectHistory): string {
@@ -109,7 +123,12 @@ export interface AppState {
   projectPath: string | null;
   activeMapId: MapId;
   selectedEntityId: EntityId | null;
-  selectedPrimitiveId: EntityId | null;
+  /** Выбранные примитивы (мультивыделение рамкой или shift+клик). */
+  selectedPrimitiveIds: EntityId[];
+  /** Копия примитива в сессионном буфере (Ctrl+C / Ctrl+V). */
+  clipboard: Primitive | null;
+  /** Счётчик вставок: каждая следующая копия смещается дальше. */
+  pasteCount: number;
   tool: Tool;
   /** Черновик рисуемой линии/области (ветвь, предпросмотр на холсте). */
   drawingDraft: DrawingDraft | null;
@@ -135,7 +154,12 @@ export interface AppState {
   setTool: (tool: Tool) => void;
   selectEntity: (id: EntityId | null) => void;
   selectPrimitive: (id: EntityId | null) => void;
+  selectPrimitives: (ids: EntityId[]) => void;
+  togglePrimitiveSelection: (id: EntityId) => void;
   clearSelection: () => void;
+  copySelectedPrimitive: () => void;
+  pastePrimitive: () => void;
+  duplicateSelectedPrimitive: () => void;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -145,12 +169,19 @@ export interface AppState {
   cancelLabelDraft: () => void;
   confirmLabelDraft: (text: string) => void;
   drawingAddPoint: (x: number, y: number) => void;
+  startPenStroke: (x: number, y: number) => void;
+  penAddPoint: (x: number, y: number) => void;
   finishDrawing: () => void;
   cancelDrawing: () => void;
+  movePrimitiveVertexBy: (primitiveId: EntityId, vertexIndex: number, x: number, y: number) => void;
+  insertVertexInto: (primitiveId: EntityId, segmentIndex: number, point: Vec2) => void;
   movePrimitiveBy: (primitiveId: EntityId, dx: number, dy: number) => void;
+  moveSelectedPrimitives: (dx: number, dy: number) => void;
+  rotatePrimitiveBy: (primitiveId: EntityId, angleRad: number) => void;
   adjustLabelFontSize: (primitiveId: EntityId, delta: number) => void;
   updatePrimitiveProps: (mapId: MapId, primitiveId: EntityId, patch: PrimitivePatch) => void;
   deletePrimitiveById: (mapId: MapId, primitiveId: EntityId) => void;
+  deleteSelectedPrimitives: () => void;
   restorePrimitiveFromHistory: (entryId: string) => void;
   addLegendTypeFor: (shape: LegendShape) => void;
   updateLegendTypeProps: (typeId: string, patch: LegendTypePatch) => void;
@@ -181,14 +212,14 @@ export interface AppState {
 export const useAppStore = create<AppState>()((set, get) => {
   /** Применяет новое состояние проекта и пишет запись в журнал. */
   const applyNow = (next: Project, meta: EntryInput, status?: string) => {
-    const { project, activeMapId, selectedEntityId, selectedPrimitiveId, history } = get();
+    const { project, activeMapId, selectedEntityId, selectedPrimitiveIds, history } = get();
     if (next === project) return;
     const entry = makeEntry(meta, next);
     const newHistory = record(history, entry);
     set({
       project: next,
       history: newHistory,
-      ...sanitize(next, activeMapId, selectedEntityId, selectedPrimitiveId),
+      ...sanitize(next, activeMapId, selectedEntityId, selectedPrimitiveIds),
       ...(status !== undefined ? { status } : null),
     });
   };
@@ -286,7 +317,9 @@ export const useAppStore = create<AppState>()((set, get) => {
     projectPath: null,
     activeMapId: initialProject.rootMapId,
     selectedEntityId: null,
-    selectedPrimitiveId: null,
+    selectedPrimitiveIds: [],
+    clipboard: null,
+    pasteCount: 0,
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -311,11 +344,72 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({ status: tool === "add-location" ? "Кликните по холсту, чтобы поставить локацию" : "Режим выбора" });
     },
 
-    selectEntity: (id) => set({ selectedEntityId: id, selectedPrimitiveId: null }),
+    selectEntity: (id) => set({ selectedEntityId: id, selectedPrimitiveIds: [] }),
 
-    selectPrimitive: (id) => set({ selectedPrimitiveId: id, selectedEntityId: null }),
+    selectPrimitive: (id) => set({ selectedPrimitiveIds: id ? [id] : [], selectedEntityId: null }),
 
-    clearSelection: () => set({ selectedEntityId: null, selectedPrimitiveId: null }),
+    selectPrimitives: (ids) => set({ selectedPrimitiveIds: ids, selectedEntityId: null }),
+
+    togglePrimitiveSelection: (id) => {
+      const current = get().selectedPrimitiveIds;
+      set({
+        selectedPrimitiveIds: current.includes(id)
+          ? current.filter((x) => x !== id)
+          : [...current, id],
+        selectedEntityId: null,
+      });
+    },
+
+    clearSelection: () => set({ selectedEntityId: null, selectedPrimitiveIds: [] }),
+
+    copySelectedPrimitive: () => {
+      const { project, activeMapId, selectedPrimitiveIds } = get();
+      if (selectedPrimitiveIds.length !== 1) return;
+      const primitive = findPrimitive(project, activeMapId, selectedPrimitiveIds[0]);
+      if (!primitive) return;
+      set({
+        clipboard: JSON.parse(JSON.stringify(primitive)) as Primitive,
+        pasteCount: 0,
+        status: `Скопировано: ${PRIMITIVE_KIND_NOUN[primitive.kind]} «${displayNameOf(primitive)}» (Ctrl+V — вставить)`,
+      });
+    },
+
+    pastePrimitive: () => {
+      const { project, activeMapId, clipboard, pasteCount } = get();
+      if (!clipboard) {
+        set({ status: "Буфер пуст: скопируйте примитив (Ctrl+C)" });
+        return;
+      }
+      const step = 20;
+      const offset = { x: step * (pasteCount + 1), y: step * (pasteCount + 1) };
+      try {
+        const result = insertPrimitiveCopy(project, activeMapId, clipboard, offset);
+        const name = result.project.maps[activeMapId]?.primitives.find(
+          (p) => p.id === result.primitiveId,
+        )?.name;
+        set({ pasteCount: pasteCount + 1 });
+        withBranchGuard(() => {
+          applyNow(
+            result.project,
+            {
+              operationType: "primitive.created",
+              description: `Создана копия: ${PRIMITIVE_KIND_NOUN[clipboard.kind]} «${name ?? clipboard.name}»`,
+              mapId: activeMapId,
+              entityId: result.primitiveId,
+            },
+            `Вставлено: ${PRIMITIVE_KIND_NOUN[clipboard.kind]} «${name ?? clipboard.name}»`,
+          );
+          set({ selectedPrimitiveIds: [result.primitiveId] });
+        });
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось вставить примитив" });
+      }
+    },
+
+    duplicateSelectedPrimitive: () => {
+      get().copySelectedPrimitive();
+      get().pastePrimitive();
+    },
 
     openMap: (id) => {
       const { project } = get();
@@ -323,7 +417,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({
         activeMapId: id,
         selectedEntityId: null,
-        selectedPrimitiveId: null,
+        selectedPrimitiveIds: [],
         labelDraft: null,
         status: `Открыта карта «${project.maps[id].name}»`,
       });
@@ -349,7 +443,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         projectPath: null,
         activeMapId: project.rootMapId,
         selectedEntityId: null,
-        selectedPrimitiveId: null,
+        selectedPrimitiveIds: [],
         drawingDraft: null,
         labelDraft: null,
         selectedTypeId: null,
@@ -375,7 +469,7 @@ export const useAppStore = create<AppState>()((set, get) => {
           },
           "Локация создана. Двойной клик по маркеру — вход внутрь",
         );
-        set({ selectedEntityId: result.entityId, selectedPrimitiveId: null, tool: "select" });
+        set({ selectedEntityId: result.entityId, selectedPrimitiveIds: [], tool: "select" });
       });
     },
 
@@ -400,7 +494,7 @@ export const useAppStore = create<AppState>()((set, get) => {
           },
           `Создана точка «${primitive.name}»`,
         );
-        set({ selectedPrimitiveId: primitive.id, selectedEntityId: null });
+        set({ selectedPrimitiveIds: [primitive.id], selectedEntityId: null });
       });
     },
 
@@ -436,7 +530,7 @@ export const useAppStore = create<AppState>()((set, get) => {
           },
           `Создана подпись «${trimmed}»`,
         );
-        set({ selectedPrimitiveId: primitive.id, selectedEntityId: null });
+        set({ selectedPrimitiveIds: [primitive.id], selectedEntityId: null });
       });
     },
 
@@ -448,6 +542,18 @@ export const useAppStore = create<AppState>()((set, get) => {
       } else {
         set({ drawingDraft: { ...drawingDraft, points: [...drawingDraft.points, { x, y }] } });
       }
+    },
+
+    startPenStroke: (x, y) => {
+      set({ drawingDraft: { kind: "pen", points: [{ x, y }] } });
+    },
+
+    penAddPoint: (x, y) => {
+      const { drawingDraft } = get();
+      if (!drawingDraft || drawingDraft.kind !== "pen") return;
+      const last = drawingDraft.points[drawingDraft.points.length - 1];
+      if (last && Math.hypot(x - last.x, y - last.y) < 1) return;
+      set({ drawingDraft: { ...drawingDraft, points: [...drawingDraft.points, { x, y }] } });
     },
 
     finishDrawing: () => {
@@ -468,11 +574,13 @@ export const useAppStore = create<AppState>()((set, get) => {
       }
       const map = project.maps[activeMapId];
       if (!map) return;
-      const type = activeTypeForShape(kind);
+      // Перо рисует линию — тип берём формы line.
+      const shape = kind === "area" ? "area" : "line";
+      const type = activeTypeForShape(shape);
       if (!type) {
         set({
           drawingDraft: null,
-          status: `Нет типа легенды формы «${kind}» — создайте его в панели легенды`,
+          status: `Нет типа легенды формы «${shape}» — создайте его в панели легенды`,
         });
         return;
       }
@@ -481,18 +589,20 @@ export const useAppStore = create<AppState>()((set, get) => {
           ? createAreaPrimitive(map, type.id, points)
           : createLinePrimitive(map, type.id, points);
       const name = primitive.name;
+      const noun =
+        kind === "pen" ? "Свободная линия" : PRIMITIVE_KIND_NOUN[kind][0].toUpperCase() + PRIMITIVE_KIND_NOUN[kind].slice(1);
       withBranchGuard(() => {
         applyNow(
           addPrimitive(project, activeMapId, primitive),
           {
             operationType: "primitive.created",
-            description: `Создана ${PRIMITIVE_KIND_NOUN[kind]} «${name}»`,
+            description: `${noun} «${name}» создана`,
             mapId: activeMapId,
             entityId: primitive.id,
           },
-          `Создана ${PRIMITIVE_KIND_NOUN[kind]} «${name}». Enter — нарисовать ещё одну, Esc — выйти`,
+          `${noun} «${name}» создана. Esc — выйти из инструмента`,
         );
-        set({ selectedPrimitiveId: primitive.id, selectedEntityId: null, drawingDraft: null });
+        set({ selectedPrimitiveIds: [primitive.id], selectedEntityId: null, drawingDraft: null });
       });
     },
 
@@ -501,11 +611,56 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({ drawingDraft: null, status: "Черновик отменён" });
     },
 
-    movePrimitiveBy: (primitiveId, dx, dy) => {
-      if (dx === 0 && dy === 0) return;
+    movePrimitiveVertexBy: (primitiveId, vertexIndex, x, y) => {
       const { project, activeMapId } = get();
       const primitive = findPrimitive(project, activeMapId, primitiveId);
+      if (!primitive || primitive.locked) return;
+      const noun = PRIMITIVE_KIND_NOUN[primitive.kind];
+      try {
+        apply(
+          movePrimitiveVertex(project, activeMapId, primitiveId, vertexIndex, x, y),
+          {
+            operationType: "primitive.updated",
+            description: `${noun[0].toUpperCase() + noun.slice(1)} «${displayNameOf(primitive)}»: вершина ${vertexIndex + 1} перемещена`,
+            mapId: activeMapId,
+            entityId: primitiveId,
+          },
+        );
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось переместить вершину" });
+      }
+    },
+
+    insertVertexInto: (primitiveId, segmentIndex, point) => {
+      const { project, activeMapId } = get();
+      const primitive = findPrimitive(project, activeMapId, primitiveId);
+      if (!primitive || primitive.locked) return;
+      const noun = PRIMITIVE_KIND_NOUN[primitive.kind];
+      try {
+        apply(
+          insertPrimitiveVertex(project, activeMapId, primitiveId, segmentIndex, point),
+          {
+            operationType: "primitive.updated",
+            description: `${noun[0].toUpperCase() + noun.slice(1)} «${displayNameOf(primitive)}»: добавлена вершина`,
+            mapId: activeMapId,
+            entityId: primitiveId,
+          },
+        );
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось добавить вершину" });
+      }
+    },
+
+    movePrimitiveBy: (primitiveId, dx, dy) => {
+      if (dx === 0 && dy === 0) return;
+      const { project, activeMapId, selectedPrimitiveIds } = get();
+      const primitive = findPrimitive(project, activeMapId, primitiveId);
       if (!primitive) return;
+      // Если примитив входит в мультивыделение — двигаем всю группу.
+      if (selectedPrimitiveIds.includes(primitiveId) && selectedPrimitiveIds.length > 1) {
+        get().moveSelectedPrimitives(dx, dy);
+        return;
+      }
       apply(
         movePrimitive(project, activeMapId, primitiveId, dx, dy),
         {
@@ -515,6 +670,54 @@ export const useAppStore = create<AppState>()((set, get) => {
           entityId: primitiveId,
         },
       );
+    },
+
+    moveSelectedPrimitives: (dx, dy) => {
+      if (dx === 0 && dy === 0) return;
+      const { project, activeMapId, selectedPrimitiveIds } = get();
+      const map = project.maps[activeMapId];
+      if (!map || selectedPrimitiveIds.length === 0) return;
+      const movable = selectedPrimitiveIds.filter((id) => {
+        const p = map.primitives.find((x) => x.id === id);
+        return !!p && !p.locked;
+      });
+      if (movable.length === 0) return;
+      const first = map.primitives.find((x) => x.id === movable[0]);
+      apply(
+        movePrimitives(project, activeMapId, movable, dx, dy),
+        {
+          operationType: "primitive.moved",
+          description:
+            movable.length === 1 && first
+              ? `${PRIMITIVE_KIND_NOUN[first.kind]} «${displayNameOf(first)}» перемещена`
+              : `Перемещено примитивов: ${movable.length}`,
+          mapId: activeMapId,
+          entityId: movable[0],
+        },
+      );
+    },
+
+    rotatePrimitiveBy: (primitiveId, angleRad) => {
+      const { project, activeMapId } = get();
+      const primitive = findPrimitive(project, activeMapId, primitiveId);
+      if (!primitive) return;
+      const deg = Math.round((angleRad * 180) / Math.PI);
+      if (deg === 0) return;
+      const noun = PRIMITIVE_KIND_NOUN[primitive.kind];
+      try {
+        apply(
+          rotatePrimitive(project, activeMapId, primitiveId, angleRad),
+          {
+            operationType: "primitive.updated",
+            description: `${noun[0].toUpperCase() + noun.slice(1)} «${displayNameOf(primitive)}» повёрнута на ${deg}°`,
+            mapId: activeMapId,
+            entityId: primitiveId,
+            coalesceKey: `rotate:${primitiveId}`,
+          },
+        );
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось повернуть примитив" });
+      }
     },
 
     adjustLabelFontSize: (primitiveId, delta) => {
@@ -594,7 +797,53 @@ export const useAppStore = create<AppState>()((set, get) => {
           },
           `«${name}» удалена. Восстановить: Ctrl+Z или кнопка в панели «История»`,
         );
-        set({ selectedPrimitiveId: null });
+        set({ selectedPrimitiveIds: [] });
+      });
+    },
+
+    deleteSelectedPrimitives: () => {
+      const { project, activeMapId, selectedPrimitiveIds } = get();
+      const map = project.maps[activeMapId];
+      if (!map || selectedPrimitiveIds.length === 0) return;
+      const deletable: EntityId[] = [];
+      let lockedCount = 0;
+      for (const id of selectedPrimitiveIds) {
+        const p = map.primitives.find((x) => x.id === id);
+        if (!p) continue;
+        if (p.locked) lockedCount += 1;
+        else deletable.push(id);
+      }
+      if (deletable.length === 0) {
+        set({
+          status:
+            lockedCount > 0
+              ? "Выбранные примитивы заблокированы: разблокируйте перед удалением"
+              : "Нечего удалять",
+        });
+        return;
+      }
+      const first = map.primitives.find((x) => x.id === deletable[0]);
+      withBranchGuard(() => {
+        applyNow(
+          deletePrimitives(project, activeMapId, deletable),
+          {
+            operationType: "primitive.deleted",
+            description:
+              deletable.length === 1 && first
+                ? `Удалена ${PRIMITIVE_KIND_NOUN[first.kind]} «${displayNameOf(first)}»`
+                : `Удалено примитивов: ${deletable.length}`,
+            mapId: activeMapId,
+            entityId: deletable[0],
+            restoreInfo:
+              deletable.length === 1 && first
+                ? { kind: "primitive", mapId: activeMapId, primitive: { ...first } }
+                : undefined,
+          },
+          `Удалено примитивов: ${deletable.length}${
+            lockedCount > 0 ? ` (заблокированные пропущены: ${lockedCount})` : ""
+          }. Восстановить: Ctrl+Z или панель «История»`,
+        );
+        set({ selectedPrimitiveIds: [] });
       });
     },
 
@@ -622,7 +871,7 @@ export const useAppStore = create<AppState>()((set, get) => {
             },
             `Примитив «${name}» восстановлен`,
           );
-          if (mapId === activeMapId) set({ selectedPrimitiveId: primitiveId });
+          if (mapId === activeMapId) set({ selectedPrimitiveIds: [primitiveId] });
         });
       } catch (e) {
         set({ status: e instanceof Error ? e.message : "Не удалось восстановить примитив" });
@@ -886,7 +1135,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
 
     undoChange: () => {
-      const { project, history, activeMapId, selectedEntityId, selectedPrimitiveId } = get();
+      const { project, history, activeMapId, selectedEntityId, selectedPrimitiveIds } = get();
       const step = undo(history);
       if (!step) {
         set({ status: "Отменять нечего" });
@@ -896,13 +1145,13 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({
         project: step.project,
         history: step.history,
-        ...sanitize(step.project, activeMapId, selectedEntityId, selectedPrimitiveId),
+        ...sanitize(step.project, activeMapId, selectedEntityId, selectedPrimitiveIds),
         status: `Отменено. Текущая запись: ${positionDescription(step.history)}`,
       });
     },
 
     redoChange: () => {
-      const { project, history, activeMapId, selectedEntityId, selectedPrimitiveId } = get();
+      const { project, history, activeMapId, selectedEntityId, selectedPrimitiveIds } = get();
       const step = redo(history);
       if (!step) {
         set({ status: "Повторять нечего" });
@@ -912,13 +1161,13 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({
         project: step.project,
         history: step.history,
-        ...sanitize(step.project, activeMapId, selectedEntityId, selectedPrimitiveId),
+        ...sanitize(step.project, activeMapId, selectedEntityId, selectedPrimitiveIds),
         status: `Повторено. Текущая запись: ${positionDescription(step.history)}`,
       });
     },
 
     jumpToHistory: (index) => {
-      const { project, history, activeMapId, selectedEntityId, selectedPrimitiveId } = get();
+      const { project, history, activeMapId, selectedEntityId, selectedPrimitiveIds } = get();
       if (index === history.position) return;
       const step = jumpTo(history, index);
       if (step.project === project) {
@@ -928,7 +1177,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({
         project: step.project,
         history: step.history,
-        ...sanitize(step.project, activeMapId, selectedEntityId, selectedPrimitiveId),
+        ...sanitize(step.project, activeMapId, selectedEntityId, selectedPrimitiveIds),
         status: `Текущая запись: ${positionDescription(step.history)}`,
       });
     },
@@ -990,14 +1239,14 @@ export const useAppStore = create<AppState>()((set, get) => {
             ),
           );
         })();
-        const clean = sanitize(project, project.rootMapId, null, null);
+        const clean = sanitize(project, project.rootMapId, null, []);
         set({
           project,
           projectPath: path,
           history,
           ...clean,
           selectedEntityId: null,
-          selectedPrimitiveId: null,
+          selectedPrimitiveIds: [],
           drawingDraft: null,
           labelDraft: null,
           selectedTypeId: null,
@@ -1079,9 +1328,23 @@ export function useSelectedMarker(): LocationLinkEntity | null {
 
 export function useSelectedPrimitive(): Primitive | null {
   return useAppStore((s) => {
-    if (!s.selectedPrimitiveId) return null;
+    if (s.selectedPrimitiveIds.length !== 1) return null;
     const map = s.project.maps[s.activeMapId];
     if (!map) return null;
-    return map.primitives.find((p) => p.id === s.selectedPrimitiveId) ?? null;
+    return map.primitives.find((p) => p.id === s.selectedPrimitiveIds[0]) ?? null;
   });
+}
+
+const EMPTY_PRIMITIVES: Primitive[] = [];
+
+export function useSelectedPrimitives(): Primitive[] {
+  return useAppStore(
+    useShallow((s) => {
+      const map = s.project.maps[s.activeMapId];
+      if (!map || s.selectedPrimitiveIds.length === 0) return EMPTY_PRIMITIVES;
+      return s.selectedPrimitiveIds
+        .map((id) => map.primitives.find((p) => p.id === id))
+        .filter((p): p is Primitive => !!p);
+    }),
+  );
 }

@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { countChildren, legendTypeById } from "../core/project";
 import type { LegendShape, MapScale } from "../core/types";
-import { useAppStore, useSelectedMarker, useSelectedPrimitive } from "../state/store";
+import {
+  useAppStore,
+  useSelectedMarker,
+  useSelectedPrimitive,
+  useSelectedPrimitives,
+} from "../state/store";
 import ConfirmDialog from "./ConfirmDialog";
 
 const SHAPE_NAME: Record<LegendShape, string> = {
@@ -13,17 +18,72 @@ const SHAPE_NAME: Record<LegendShape, string> = {
 
 export default function Inspector() {
   const marker = useSelectedMarker();
-  const primitive = useSelectedPrimitive();
+  const primitives = useSelectedPrimitives();
+  if (marker) {
+    return (
+      <div className="inspector">
+        <MarkerInspector key={marker.id} />
+      </div>
+    );
+  }
+  if (primitives.length > 1) {
+    return (
+      <div className="inspector">
+        <MultiPrimitiveInspector />
+      </div>
+    );
+  }
+  if (primitives.length === 1) {
+    return (
+      <div className="inspector">
+        <PrimitiveInspector key={primitives[0].id} />
+      </div>
+    );
+  }
   return (
     <div className="inspector">
-      {marker ? (
-        <MarkerInspector key={marker.id} />
-      ) : primitive ? (
-        <PrimitiveInspector key={primitive.id} />
-      ) : (
-        <MapInspector />
-      )}
+      <MapInspector />
     </div>
+  );
+}
+
+function MultiPrimitiveInspector() {
+  const primitives = useSelectedPrimitives();
+  const clearSelection = useAppStore((s) => s.clearSelection);
+  const deleteSelectedPrimitives = useAppStore((s) => s.deleteSelectedPrimitives);
+  const moveSelectedPrimitives = useAppStore((s) => s.moveSelectedPrimitives);
+  const lockedCount = primitives.filter((p) => p.locked).length;
+
+  return (
+    <>
+      <h2>Выбрано примитивов: {primitives.length}</h2>
+      <div className="field">
+        <div className="value">
+          {primitives.map((p) => (
+            <div key={p.id}>
+              {SHAPE_NAME[p.kind]} «{p.kind === "label" && p.text.trim() ? p.text.trim() : p.name}»
+              {p.locked ? " (заблокирован)" : ""}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="buttons">
+        <button
+          onClick={() => moveSelectedPrimitives(10, 0)}
+          title="Сдвинуть всю группу на 10 единиц вправо"
+        >
+          Сдвинуть группу →
+        </button>
+        <button onClick={deleteSelectedPrimitives}>
+          Удалить выбранные{lockedCount > 0 ? ` (${lockedCount} заблокированы — будут пропущены)` : ""}
+        </button>
+        <button onClick={clearSelection}>Снять выделение</button>
+      </div>
+      <div className="hint">
+        Группу можно перетаскивать на холсте за любой выбранный примитив. Добавление к
+        выделению — Shift+клик или рамка.
+      </div>
+    </>
   );
 }
 
@@ -253,6 +313,8 @@ function PrimitiveInspector() {
   const deletePrimitiveById = useAppStore((s) => s.deletePrimitiveById);
   const clearSelection = useAppStore((s) => s.clearSelection);
   const adjustLabelFontSize = useAppStore((s) => s.adjustLabelFontSize);
+  const rotatePrimitiveBy = useAppStore((s) => s.rotatePrimitiveBy);
+  const copySelectedPrimitive = useAppStore((s) => s.copySelectedPrimitive);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (!primitive) return null;
@@ -368,6 +430,27 @@ function PrimitiveInspector() {
         <div className="value">{geometry}</div>
       </div>
 
+      {(primitive.kind === "line" || primitive.kind === "area") && (
+        <div className="field">
+          <label>Поворот вокруг центра (ручка над фигурой на холсте)</label>
+          <div className="row">
+            <button title="−45°" onClick={() => rotatePrimitiveBy(primitive.id, (-45 * Math.PI) / 180)}>
+              −45°
+            </button>
+            <button title="−15°" onClick={() => rotatePrimitiveBy(primitive.id, (-15 * Math.PI) / 180)}>
+              −15°
+            </button>
+            <button title="+15°" onClick={() => rotatePrimitiveBy(primitive.id, (15 * Math.PI) / 180)}>
+              +15°
+            </button>
+            <button title="+45°" onClick={() => rotatePrimitiveBy(primitive.id, (45 * Math.PI) / 180)}>
+              +45°
+            </button>
+          </div>
+          <div className="hint">Вершины фигуры можно таскать; двойной клик по ребру добавляет вершину.</div>
+        </div>
+      )}
+
       <div className="field">
         <label>Заметка</label>
         <textarea
@@ -400,6 +483,9 @@ function PrimitiveInspector() {
       </div>
 
       <div className="buttons">
+        <button onClick={copySelectedPrimitive} title="Ctrl+C — копировать, Ctrl+V — вставить">
+          Копировать
+        </button>
         <button disabled={primitive.locked} onClick={() => setConfirmDelete(true)}>
           Удалить примитив
         </button>

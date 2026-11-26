@@ -620,11 +620,23 @@ export function movePrimitive(
   dx: number,
   dy: number,
 ): Project {
+  return movePrimitives(project, mapId, [primitiveId], dx, dy);
+}
+
+/** Смещает несколько примитивов одной транзакцией (одна запись в журнале). */
+export function movePrimitives(
+  project: Project,
+  mapId: MapId,
+  primitiveId: EntityId[],
+  dx: number,
+  dy: number,
+): Project {
   const map = project.maps[mapId];
   if (!map) throw new Error("Карта не найдена");
+  const idSet = new Set(primitiveId);
   const ts = now();
   const move = (p: Primitive): Primitive => {
-    if (p.id !== primitiveId) return p;
+    if (!idSet.has(p.id)) return p;
     if (p.kind === "point" || p.kind === "label") {
       return { ...p, x: p.x + dx, y: p.y + dy, updatedAt: ts };
     }
@@ -635,6 +647,217 @@ export function movePrimitive(
     maps: {
       ...project.maps,
       [mapId]: { ...map, updatedAt: ts, primitives: map.primitives.map(move) },
+    },
+  });
+}
+
+/** Условный центр примитива — центр ограничивающего прямоугольника. */
+export function primitiveCenter(p: Primitive): Vec2 | null {
+  if (p.kind === "line" || p.kind === "area") {
+    if (p.points.length === 0) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const pt of p.points) {
+      minX = Math.min(minX, pt.x);
+      minY = Math.min(minY, pt.y);
+      maxX = Math.max(maxX, pt.x);
+      maxY = Math.max(maxY, pt.y);
+    }
+    return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+  }
+  return { x: p.x, y: p.y };
+}
+
+/**
+ * Поворачивает линию/область вокруг условного центра (центра
+ * ограничивающего прямоугольника) на угол в радианах. Угол запекается
+ * в координаты точек — модель данных не меняется.
+ */
+export function rotatePrimitive(
+  project: Project,
+  mapId: MapId,
+  primitiveId: EntityId,
+  angleRad: number,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const primitive = map.primitives.find((p) => p.id === primitiveId);
+  if (!primitive) throw new Error("Примитив не найден");
+  if (primitive.kind !== "line" && primitive.kind !== "area") {
+    throw new Error("Поворот доступен только для линий и областей");
+  }
+  const center = primitiveCenter(primitive);
+  if (!center) return project;
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+  const ts = now();
+  const points = primitive.points.map((pt) => ({
+    x: center.x + (pt.x - center.x) * cos - (pt.y - center.y) * sin,
+    y: center.y + (pt.x - center.x) * sin + (pt.y - center.y) * cos,
+  }));
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: {
+        ...map,
+        updatedAt: ts,
+        primitives: map.primitives.map((p) =>
+          p.id === primitiveId ? { ...p, points, updatedAt: ts } : p,
+        ),
+      },
+    },
+  });
+}
+
+/**
+ * Вставляет копию примитива на карту: новый id, имя по нумерации вида,
+ * геометрия со смещением. Свойства (тип, заметка, видимость, блокировка,
+ * текст, размер шрифта) сохраняются.
+ */
+export function insertPrimitiveCopy(
+  project: Project,
+  mapId: MapId,
+  source: Primitive,
+  offset: Vec2,
+): { project: Project; primitiveId: EntityId } {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const type = legendTypeById(project, source.typeId);
+  if (!type || type.shape !== source.kind) {
+    throw new Error("Тип легенды копии не подходит для этой карты");
+  }
+  const ts = now();
+  const base = {
+    id: newId(),
+    kind: source.kind,
+    name: nextPrimitiveName(map, source.kind),
+    typeId: source.typeId,
+    note: source.note,
+    visible: source.visible,
+    locked: source.locked,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+  let copy: Primitive;
+  if (source.kind === "line" || source.kind === "area") {
+    copy = {
+      ...base,
+      kind: source.kind,
+      points: source.points.map((pt) => ({ x: pt.x + offset.x, y: pt.y + offset.y })),
+    };
+  } else if (source.kind === "point") {
+    copy = { ...base, kind: "point", x: source.x + offset.x, y: source.y + offset.y };
+  } else {
+    copy = {
+      ...base,
+      kind: "label",
+      x: source.x + offset.x,
+      y: source.y + offset.y,
+      text: source.text,
+      fontSize: source.fontSize,
+    };
+  }
+  return { project: addPrimitive(project, mapId, copy), primitiveId: copy.id };
+}
+
+/** Перемещает одну вершину линии/области (редактирование геометрии). */
+export function movePrimitiveVertex(
+  project: Project,
+  mapId: MapId,
+  primitiveId: EntityId,
+  vertexIndex: number,
+  x: number,
+  y: number,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const primitive = map.primitives.find((p) => p.id === primitiveId);
+  if (!primitive) throw new Error("Примитив не найден");
+  if (primitive.kind !== "line" && primitive.kind !== "area") {
+    throw new Error("Вершины есть только у линий и областей");
+  }
+  if (vertexIndex < 0 || vertexIndex >= primitive.points.length) {
+    throw new Error("Вершина не найдена");
+  }
+  const ts = now();
+  const points = primitive.points.map((pt, i) => (i === vertexIndex ? { x, y } : pt));
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: {
+        ...map,
+        updatedAt: ts,
+        primitives: map.primitives.map((p) =>
+          p.id === primitiveId ? { ...p, points, updatedAt: ts } : p,
+        ),
+      },
+    },
+  });
+}
+
+/**
+ * Вставляет вершину в сегмент (после индекса segmentIndex) линии/области.
+ * Двойной клик по ребру в редакторе.
+ */
+export function insertPrimitiveVertex(
+  project: Project,
+  mapId: MapId,
+  primitiveId: EntityId,
+  segmentIndex: number,
+  point: Vec2,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const primitive = map.primitives.find((p) => p.id === primitiveId);
+  if (!primitive) throw new Error("Примитив не найден");
+  if (primitive.kind !== "line" && primitive.kind !== "area") {
+    throw new Error("Вершины есть только у линий и областей");
+  }
+  if (segmentIndex < 0 || segmentIndex >= primitive.points.length) {
+    throw new Error("Сегмент не найден");
+  }
+  const ts = now();
+  const points = [...primitive.points];
+  points.splice(segmentIndex + 1, 0, { ...point });
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: {
+        ...map,
+        updatedAt: ts,
+        primitives: map.primitives.map((p) =>
+          p.id === primitiveId ? { ...p, points, updatedAt: ts } : p,
+        ),
+      },
+    },
+  });
+}
+
+/** Удаляет несколько примитивов одной транзакцией. */
+export function deletePrimitives(
+  project: Project,
+  mapId: MapId,
+  primitiveIds: EntityId[],
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const idSet = new Set(primitiveIds);
+  if (!map.primitives.some((p) => idSet.has(p.id))) return project;
+  const ts = now();
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: {
+        ...map,
+        updatedAt: ts,
+        primitives: map.primitives.filter((p) => !idSet.has(p.id)),
+      },
     },
   });
 }
