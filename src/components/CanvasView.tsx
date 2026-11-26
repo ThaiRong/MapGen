@@ -881,6 +881,10 @@ export default function CanvasView() {
       dragRef.current = null;
       wrap.classList.remove("panning");
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      // Перерисовка нужна даже когда ничего не закоммичено: признаки
+      // выбора (ручка поворота, вершины) рисуются только при drag === null,
+      // а без изменения проекта события перерисовки не было бы.
+      draw();
       const state = useAppStore.getState();
 
       if (drag.mode === "marker" && drag.moved) {
