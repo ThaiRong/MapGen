@@ -146,3 +146,95 @@ export function pickFraction<T>(items: T[], fraction: number, rng: Rng): T[] {
   const keep = Math.round(items.length * Math.min(1, Math.max(0, fraction)));
   return idx.slice(0, keep).sort((a, b) => a - b).map((i) => items[i]);
 }
+
+/* ---------- Проверка пересечений полигонов ---------- */
+
+function pointInPoly(p: Vec2, poly: Vec2[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/**
+ * Пересекаются ли два полигона сверх допуска. Перекрытие измеряется
+ * SAT-глубиной (минимальная ось проникновения): общие границы, стыки
+ * и джиттер мелких пересечений глубиной до tolerance не считаются
+ * наложением — по требованию «не накладываются сверх заданного
+ * допуска». Вложенность проверяется отдельно через центроиды.
+ */
+export function polygonsOverlap(a: Vec2[], b: Vec2[], tolerance = 2): boolean {
+  if (a.length < 3 || b.length < 3) return false;
+  // Быстрый отсев по ограничивающим прямоугольникам.
+  const box = (pts: Vec2[]) => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of pts) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    return { minX, minY, maxX, maxY };
+  };
+  const A = box(a);
+  const B = box(b);
+  if (A.maxX < B.minX || B.maxX < A.minX || A.maxY < B.minY || B.maxY < A.minY) return false;
+
+  const project = (pts: Vec2[], nx: number, ny: number): { min: number; max: number } => {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const p of pts) {
+      const d = p.x * nx + p.y * ny;
+      min = Math.min(min, d);
+      max = Math.max(max, d);
+    }
+    return { min, max };
+  };
+  const axes: { nx: number; ny: number }[] = [];
+  for (const pts of [a, b]) {
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i, i += 1) {
+      const ex = pts[i].x - pts[j].x;
+      const ey = pts[i].y - pts[j].y;
+      const len = Math.hypot(ex, ey);
+      if (len < 1e-9) continue;
+      axes.push({ nx: -ey / len, ny: ex / len });
+    }
+  }
+  let depth = Infinity;
+  for (const { nx, ny } of axes) {
+    const pa = project(a, nx, ny);
+    const pb = project(b, nx, ny);
+    const overlap = Math.min(pa.max, pb.max) - Math.max(pa.min, pb.min);
+    if (overlap <= 0) return false; // разделены этой осью
+    depth = Math.min(depth, overlap);
+  }
+  if (depth > tolerance) return true;
+  // Мелкое проникновение — но один может содержать другого центроид
+  // (вложенность при коллинеарных гранях SAT может недооценить).
+  if (pointInPoly(polygonCentroid(a), b)) {
+    // центроид внутри при малой глубине — считаем стыком, только если
+    // полигон целиком не внутри: проверяем, что хотя бы одна вершина
+    // выходит за bounds другого с запасом.
+    const bb = box(b);
+    const insideAll = a.every(
+      (p) => p.x > bb.minX + tolerance && p.x < bb.maxX - tolerance && p.y > bb.minY + tolerance && p.y < bb.maxY - tolerance,
+    );
+    if (insideAll) return true;
+  }
+  if (pointInPoly(polygonCentroid(b), a)) {
+    const ab = box(a);
+    const insideAll = b.every(
+      (p) => p.x > ab.minX + tolerance && p.x < ab.maxX - tolerance && p.y > ab.minY + tolerance && p.y < ab.maxY - tolerance,
+    );
+    if (insideAll) return true;
+  }
+  return false;
+}

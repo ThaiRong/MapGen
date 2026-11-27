@@ -51,6 +51,7 @@ import {
 } from "../src/core/project";
 import { generate } from "../src/core/generation/generate";
 import { generateStructure } from "../src/core/generation/structure/generateStructure";
+import { polygonsOverlap } from "../src/core/generation/structure/partition";
 import { deriveSeed } from "../src/core/generation/structure/rng";
 import {
   createEmptyProfile,
@@ -951,6 +952,21 @@ for (const arch of ["cellular", "linear", "radial", "cluster", "open", "mixed"] 
       r.primitives.filter((p) => p.kind === "line").every((p) => p.kind === "line" && p.points.length >= 2),
     `архетип ${arch}: геометрия валидна и внутри bounds`,
   );
+  // Агрессивные параметры: элементы всё равно не должны пересекаться
+  // сверх допуска (требование итерации 4).
+  const dense = generateStructure(
+    structureSpec({ archetype: arch, density: 0.9, sizeVariance: 1, cellScale: 0.9, pointDensity: 0 }),
+  );
+  const denseAreas = dense.primitives.filter(
+    (p): p is import("../src/core/types").AreaPrimitive => p.kind === "area",
+  );
+  let overlaps = 0;
+  for (let i = 0; i < denseAreas.length; i += 1) {
+    for (let j = i + 1; j < denseAreas.length; j += 1) {
+      if (polygonsOverlap(denseAreas[i].points, denseAreas[j].points)) overlaps += 1;
+    }
+  }
+  assert(overlaps === 0, `архетип ${arch}: области не пересекаются даже при агрессивных параметрах`);
 }
 assert(stA.stats.nested <= 2, "вложенных локаций не больше nestedCount");
 assert(stA.nested.every((n) => inBoundsST(n)), "позиции вложенных внутри bounds");

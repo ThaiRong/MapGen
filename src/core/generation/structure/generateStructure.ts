@@ -13,6 +13,7 @@ import type {
   Vec2,
 } from "../../types";
 import { generateArchetype, insetRect, type StructureContext } from "./archetypes";
+import { polygonArea, polygonsOverlap } from "./partition";
 import { createRng } from "./rng";
 
 export const MAX_S_AREAS = 120;
@@ -68,6 +69,27 @@ export function generateStructure(spec: StructureSpec, opts?: { preview?: boolea
   const ctx: StructureContext = { spec, rng, bounds, minSize, charSize };
 
   const geo = generateArchetype(ctx, opts?.preview === true);
+
+  // Требование итерации 4: элементы не накладываются друг на друга сверх
+  // допуска. Жадно оставляем крупнейшие области, пересекающиеся отбрасываем
+  // (детерминированно: сортировка по площади, при равенстве — по индексу).
+  const droppedByOverlap = ((): number => {
+    const indexed = geo.areas.map((pts, i) => ({ pts, i, area: polygonArea(pts) }));
+    indexed.sort((a, b) => b.area - a.area || a.i - b.i);
+    const kept: { pts: Vec2[]; i: number }[] = [];
+    for (const cand of indexed) {
+      if (kept.some((k) => polygonsOverlap(k.pts, cand.pts))) continue;
+      kept.push(cand);
+    }
+    kept.sort((a, b) => a.i - b.i);
+    geo.areas = kept.map((k) => k.pts);
+    return indexed.length - kept.length;
+  })();
+  if (droppedByOverlap > 0) {
+    warnings.push(
+      `${droppedByOverlap} областей отброшено: пересекались с другими элементами сверх допуска`,
+    );
+  }
 
   const primitives: Primitive[] = [];
   let idCounter = 0;

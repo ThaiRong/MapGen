@@ -284,11 +284,11 @@ function radial(ctx: StructureContext, _preview: boolean): StructureGeometry {
         [r1, a1],
         [r0, a1],
       ] as const) {
+        // Без джиттера вершин: соседние секторы делят рёбра точно,
+        // и стык не считается наложением (допуск обеспечивается
+        // фильтрацией polygonsOverlap).
         const rr = Math.max(minSize * 0.2, r);
-        pts.push({
-          x: center.x + Math.cos(a) * rr + (rng() - 0.5) * spec.irregularity * minSize * 0.15,
-          y: center.y + Math.sin(a) * rr + (rng() - 0.5) * spec.irregularity * minSize * 0.15,
-        });
+        pts.push({ x: center.x + Math.cos(a) * rr, y: center.y + Math.sin(a) * rr });
       }
       if (polygonArea(pts) >= minSize * minSize * 0.4) areas.push(pts);
     }
