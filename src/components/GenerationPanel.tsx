@@ -105,6 +105,7 @@ function TerrainSection() {
   const [params, setParams] = useState<TerrainParams>(TERRAIN_DEFAULTS);
   const [confirmApply, setConfirmApply] = useState<{ spec: GenerationSpec; replace: number } | null>(null);
   const tokenRef = useRef(0);
+  const lastSpecJsonRef = useRef<string>("");
 
   const patch = (p: Partial<TerrainParams>) => setParams((prev) => ({ ...prev, ...p }));
 
@@ -173,11 +174,19 @@ function TerrainSection() {
       store.setGenerationPreview(null);
       return;
     }
+    const specJson = JSON.stringify(spec);
     const token = ++tokenRef.current;
     store.setGenerationCalculating(true);
     const timer = setTimeout(() => {
-      const result = generate(spec, { preview: true });
       if (token !== tokenRef.current) return;
+      // Спека не изменилась — пересчёт не нужен (например, зум при
+      // фиксированной рамке области).
+      if (specJson === lastSpecJsonRef.current) {
+        store.setGenerationCalculating(false);
+        return;
+      }
+      const result = generate(spec, { preview: true });
+      lastSpecJsonRef.current = specJson;
       store.setGenerationPreview({
         primitives: result.primitives,
         stats: result.stats,
@@ -302,6 +311,8 @@ interface StructureParams {
   typeLine: string;
   typePoint: string;
   typeLabel: string;
+  /** view — область следует за видом; rect — зафиксирована рамкой. */
+  boundsMode: "view" | "rect";
 }
 
 const STRUCTURE_DEFAULTS: StructureParams = {
@@ -321,6 +332,7 @@ const STRUCTURE_DEFAULTS: StructureParams = {
   typeLine: "",
   typePoint: "",
   typeLabel: "",
+  boundsMode: "rect",
 };
 
 const ARCHETYPES: { value: StructureArchetype; label: string }[] = [
@@ -337,10 +349,13 @@ function StructureSection() {
   const activeMapId = useAppStore((s) => s.activeMapId);
   const mapGeneration = useAppStore((s) => s.project.maps[s.activeMapId]?.generation ?? null);
   const viewport = useAppStore((s) => s.generationViewport);
+  const boundsRect = useAppStore((s) => s.generationBoundsRect);
   const preview = useAppStore((s) => s.generationPreview);
   const calculating = useAppStore((s) => s.generationCalculating);
   const applyStructure = useAppStore((s) => s.applyStructure);
   const seedPreset = useAppStore((s) => s.structureSeedPreset);
+  const startBoundsPick = useAppStore((s) => s.startGenerationBoundsPick);
+  const setStatus = useAppStore((s) => s.setStatus);
 
   const [params, setParams] = useState<StructureParams>(STRUCTURE_DEFAULTS);
   const [confirmApply, setConfirmApply] = useState<{
@@ -350,6 +365,7 @@ function StructureSection() {
     mapsKept: number;
   } | null>(null);
   const tokenRef = useRef(0);
+  const lastSpecJsonRef = useRef<string>("");
 
   const patch = (p: Partial<StructureParams>) => setParams((prev) => ({ ...prev, ...p }));
 
@@ -361,6 +377,25 @@ function StructureSection() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedPreset]);
+
+  // Область по умолчанию захватывается из вида ОДИН раз на карту и
+  // дальше фиксирована: генерация не зависит от zoom/pan, пока
+  // пользователь явно не задаст рамку заново. При смене карты
+  // область сброшена (openMap) — захватываем заново для новой карты.
+  const activeMapIdForCapture = useAppStore((s) => s.activeMapId);
+  useEffect(() => {
+    if (boundsRect === null && viewport) {
+      const vw = viewport.w / viewport.zoom;
+      const vh = viewport.h / viewport.zoom;
+      useAppStore.getState().setGenerationBoundsRect({
+        x: Math.round(viewport.centerX - vw * 0.6),
+        y: Math.round(viewport.centerY - vh * 0.6),
+        width: Math.round(vw * 1.2),
+        height: Math.round(vh * 1.2),
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMapIdForCapture]);
 
   const typeFor = (shape: LegendShape): string => {
     const chosen =
@@ -374,11 +409,23 @@ function StructureSection() {
     return chosen || project.legend.find((t) => t.shape === shape)?.id || "";
   };
 
-  const buildSpec = (): StructureSpec => {
-    const vw = viewport ? viewport.w / viewport.zoom : 1200;
-    const vh = viewport ? viewport.h / viewport.zoom : 800;
-    const cx = viewport?.centerX ?? 0;
-    const cy = viewport?.centerY ?? 0;
+  const buildSpec = (): StructureSpec | null => {
+    let b: { x: number; y: number; width: number; height: number };
+    if (params.boundsMode === "rect") {
+      if (!boundsRect) return null;
+      b = boundsRect;
+    } else if (viewport) {
+      const vw = viewport.w / viewport.zoom;
+      const vh = viewport.h / viewport.zoom;
+      b = {
+        x: viewport.centerX - vw * 0.6,
+        y: viewport.centerY - vh * 0.6,
+        width: vw * 1.2,
+        height: vh * 1.2,
+      };
+    } else {
+      b = { x: -600, y: -450, width: 1200, height: 900 };
+    }
     return {
       seed: params.seed || "зерно",
       archetype: params.archetype,
@@ -392,10 +439,10 @@ function StructureSection() {
       margin: params.margin,
       detail: params.detail,
       bounds: {
-        x: Math.round(cx - vw * 0.6),
-        y: Math.round(cy - vh * 0.6),
-        width: Math.round(vw * 1.2),
-        height: Math.round(vh * 1.2),
+        x: Math.round(b.x),
+        y: Math.round(b.y),
+        width: Math.max(60, Math.round(b.width)),
+        height: Math.max(60, Math.round(b.height)),
       },
       typeMapping: {
         area: typeFor("area"),
@@ -410,11 +457,23 @@ function StructureSection() {
   useEffect(() => {
     const store = useAppStore.getState();
     const spec = buildSpec();
+    if (!spec) {
+      store.setGenerationPreview(null);
+      return;
+    }
+    const specJson = JSON.stringify(spec);
     const token = ++tokenRef.current;
     store.setGenerationCalculating(true);
     const timer = setTimeout(() => {
-      const result = generateStructure(spec, { preview: true });
       if (token !== tokenRef.current) return;
+      // Спека не изменилась (например, движение зума при фиксированной
+      // области) — пересчёт не нужен, предпросмотр остаётся прежним.
+      if (specJson === lastSpecJsonRef.current) {
+        store.setGenerationCalculating(false);
+        return;
+      }
+      const result = generateStructure(spec, { preview: true });
+      lastSpecJsonRef.current = specJson;
       store.setGenerationPreview({
         primitives: result.primitives,
         stats: result.stats,
@@ -425,10 +484,14 @@ function StructureSection() {
     }, PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params, viewport, project.legend]);
+  }, [params, boundsRect, viewport, project.legend]);
 
   const requestApply = () => {
     const spec = buildSpec();
+    if (!spec) {
+      setStatus("Сначала задайте область генерации рамкой на холсте");
+      return;
+    }
     const analysis = analyzeStructureRegen(project, activeMapId);
     if (analysis.primitives + analysis.mapsRemoved + analysis.mapsKept > 0) {
       setConfirmApply({ spec, ...analysis });
@@ -501,7 +564,38 @@ function StructureSection() {
       </div>
       <Toggle label="Подписи" checked={params.labelsEnabled} onChange={(v) => patch({ labelsEnabled: v })} />
 
-      <PreviewStats preview={preview} calculating={calculating} nested />
+      <div className="field">
+        <label>Область генерации</label>
+        <select
+          className="select"
+          value={params.boundsMode}
+          onChange={(e) => patch({ boundsMode: e.target.value as StructureParams["boundsMode"] })}
+        >
+          <option value="rect">Фиксированная (не меняется при масштабе)</option>
+          <option value="view">Видимая область (следует за видом)</option>
+        </select>
+        {params.boundsMode === "rect" && (
+          <button className="gen-bounds-btn" onClick={startBoundsPick}>
+            {boundsRect
+              ? `Область: ${boundsRect.width}×${boundsRect.height} @ (${boundsRect.x}, ${boundsRect.y}) — задать заново`
+              : "Задать область рамкой на холсте"}
+          </button>
+        )}
+        {params.boundsMode === "rect" && boundsRect && (
+          <div className="hint">Область зафиксирована: zoom/pan предпросмотр не меняют.</div>
+        )}
+      </div>
+
+      <PreviewStats
+        preview={preview}
+        calculating={calculating}
+        nested
+        emptyHint={
+          params.boundsMode === "rect" && !boundsRect
+            ? "Задайте область генерации — предпросмотр появится автоматически"
+            : "Предпросмотр пуст: плотности в ноль?"
+        }
+      />
 
       <div className="gen-buttons">
         <button className="active" onClick={requestApply}>
@@ -654,10 +748,12 @@ function PreviewStats({
   preview,
   calculating,
   nested = false,
+  emptyHint = "Предпросмотр пуст: плотности в ноль?",
 }: {
   preview: ReturnType<typeof useAppStore.getState>["generationPreview"];
   calculating: boolean;
   nested?: boolean;
+  emptyHint?: string;
 }) {
   return (
     <div className="gen-stats">
@@ -670,7 +766,7 @@ function PreviewStats({
           {preview.stats.labels > 0 ? ` · Подписей: ${preview.stats.labels}` : ""} · Вершин: {preview.stats.vertices}
         </span>
       ) : (
-        <span>Предпросмотр пуст: плотности в ноль?</span>
+        <span>{emptyHint}</span>
       )}
     </div>
   );
