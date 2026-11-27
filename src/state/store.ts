@@ -5,6 +5,7 @@ import {
   addLocation,
   addPrimitive,
   applyGenerationToMap,
+  applyStructureToMap,
   clearMarkerArchive,
   createAreaPrimitive,
   createLabelPrimitive,
@@ -62,8 +63,10 @@ import type {
   MapView,
   Primitive,
   Project,
+  StructureSpec,
   Vec2,
 } from "../core/types";
+import { deriveSeed } from "../core/generation/structure/rng";
 import { UserCancelledError } from "../storage/interface";
 import { createStorage } from "../storage/tauri";
 
@@ -134,8 +137,16 @@ export interface AppState {
   /** Живой предпросмотр генерации (не пишется в проект и историю). */
   generationPreview: {
     primitives: Primitive[];
-    stats: { areas: number; lines: number; points: number; labels: number; vertices: number };
+    stats: {
+      areas: number;
+      lines: number;
+      points: number;
+      labels: number;
+      vertices: number;
+      nested?: number;
+    };
     warnings: string[];
+    nested?: { x: number; y: number; label: string }[];
   } | null;
   generationCalculating: boolean;
   /** Текущий вид холста — для области генерации «Видимая область». */
@@ -182,7 +193,13 @@ export interface AppState {
   cancelGenerationBoundsPick: () => void;
   setGenerationBoundsRect: (rect: { x: number; y: number; width: number; height: number } | null) => void;
   applyGeneration: (spec: GenerationSpec) => void;
+  applyStructure: (spec: StructureSpec) => void;
   regenerateGeneration: () => void;
+  generationMode: "terrain" | "structure";
+  setGenerationMode: (mode: "terrain" | "structure") => void;
+  /** Деривация зерна для панели локации (устанавливается из инспектора маркера). */
+  structureSeedPreset: string | null;
+  openLocationGeneration: (targetMapId: MapId, markerId: EntityId) => void;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -348,6 +365,8 @@ export const useAppStore = create<AppState>()((set, get) => {
     generationViewport: null,
     generationBoundsPick: false,
     generationBoundsRect: null,
+    generationMode: "terrain" as const,
+    structureSeedPreset: null,
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -489,7 +508,52 @@ export const useAppStore = create<AppState>()((set, get) => {
         set({ status: "На этой карте генерация ещё не применялась — сначала нажмите «Применить к карте»" });
         return;
       }
-      get().applyGeneration(gen.spec);
+      if (gen.kind === "structure") {
+        get().applyStructure(gen.spec);
+      } else {
+        get().applyGeneration(gen.spec);
+      }
+    },
+
+    applyStructure: (spec) => {
+      const { project, activeMapId } = get();
+      try {
+        const result = applyStructureToMap(project, activeMapId, spec);
+        const warnText = result.warnings.length > 0 ? ` Предупреждения: ${result.warnings.join("; ")}` : "";
+        withBranchGuard(() => {
+          applyNow(
+            result.project,
+            {
+              operationType: "map.generated",
+              description: `Сгенерирована локация: ${result.stats.areas} областей, ${result.stats.lines} связей, ${result.stats.points} узлов, ${result.stats.nested} вложенные локации`,
+              mapId: activeMapId,
+            },
+            `Локация сгенерирована: примитивов добавлено ${result.added}, заменено ${result.removed}; вложенных маркеров создано ${result.markersCreated}, карт создано ${result.mapsCreated}, удалено пустых ${result.mapsRemoved}, сохранено с содержимым ${result.mapsKept}.${warnText}`,
+          );
+          set({ generationPreview: null, selectedPrimitiveIds: [] });
+        });
+      } catch (e) {
+        set({ status: e instanceof Error ? e.message : "Не удалось применить генерацию локации" });
+      }
+    },
+
+    setGenerationMode: (mode) => {
+      set({ generationMode: mode, generationPreview: null });
+    },
+
+    openLocationGeneration: (targetMapId, markerId) => {
+      const { project } = get();
+      const parent = get().activeMapId;
+      const parentGen = project.maps[parent]?.generation;
+      const parentSeed = parentGen?.spec.seed ?? "зерно-1";
+      const marker = project.maps[parent]?.entities.find((e) => e.id === markerId);
+      const seed = marker ? deriveSeed(parentSeed, marker.id) : deriveSeed(parentSeed, markerId);
+      get().openMap(targetMapId);
+      set({
+        generationMode: "structure",
+        structureSeedPreset: seed,
+        status: `Панель генерации локации открыта. Зерно выведено из родительской карты: ${seed}`,
+      });
     },
 
     openMap: (id) => {

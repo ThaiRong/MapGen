@@ -207,6 +207,7 @@ function MarkerInspector() {
   const renameSelectedMarker = useAppStore((s) => s.renameSelectedMarker);
   const moveMarker = useAppStore((s) => s.moveMarker);
   const openMap = useAppStore((s) => s.openMap);
+  const openLocationGeneration = useAppStore((s) => s.openLocationGeneration);
   const deleteSelectedMarker = useAppStore((s) => s.deleteSelectedMarker);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const labelRef = useRef<HTMLInputElement>(null);
@@ -278,6 +279,15 @@ function MarkerInspector() {
           }}
         >
           Открыть локацию
+        </button>
+        <button
+          disabled={!target}
+          title="Открыть локацию и предзаполнить панель генерации (зерно выводится из родительской карты)"
+          onClick={() => {
+            if (target) openLocationGeneration(target.id, marker.id);
+          }}
+        >
+          Сгенерировать локацию
         </button>
         <button onClick={() => labelRef.current?.focus()}>Переименовать</button>
         <button className="danger" onClick={() => setConfirmDelete(true)}>

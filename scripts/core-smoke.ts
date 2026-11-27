@@ -17,7 +17,9 @@ import {
   deletePrimitive,
   deletePrimitives,
   applyGenerationToMap,
+  applyStructureToMap,
   countReplaceableGenerated,
+  analyzeStructureRegen,
   fallbackTypeForKind,
   findPrimitive,
   moveMarker,
@@ -45,6 +47,8 @@ import {
   NEW_LOCATION_NAME,
 } from "../src/core/project";
 import { generate } from "../src/core/generation/generate";
+import { generateStructure } from "../src/core/generation/structure/generateStructure";
+import { deriveSeed } from "../src/core/generation/structure/rng";
 import { buildTree, getPathToRoot, getDescendantIds } from "../src/core/tree";
 import {
   canRedo,
@@ -887,6 +891,199 @@ const regenAfterLoad = applyGenerationToMap(
 assert(
   geomSignature(regenAfterLoad.project) === geomSignature(pg),
   "перегенерация с тем же зерном после сохранения/загрузки — идентичная геометрия",
+);
+
+// 39. Структуры: детерминизм и валидность всех архетипов
+const structureSpec = (over: Record<string, unknown> = {}) =>
+  ({
+    seed: "структура-1",
+    archetype: "cellular",
+    density: 0.6,
+    cellScale: 0.5,
+    irregularity: 0.4,
+    connectivity: 0.5,
+    sizeVariance: 0.4,
+    pointDensity: 0.5,
+    nestedCount: 2,
+    margin: 0.2,
+    detail: 0.6,
+    bounds: { x: -600, y: -450, width: 1200, height: 900 },
+    typeMapping: {
+      area: pg.legend.find((t) => t.shape === "area")!.id,
+      line: pg.legend.find((t) => t.shape === "line")!.id,
+      point: pg.legend.find((t) => t.shape === "point")!.id,
+      label: pg.legend.find((t) => t.shape === "label")!.id,
+    },
+    labels: { enabled: false },
+    ...over,
+  }) as Parameters<typeof generateStructure>[0];
+
+const stA = generateStructure(structureSpec());
+const stB = generateStructure(structureSpec());
+assert(JSON.stringify(stA) === JSON.stringify(stB), "структуры: детерминизм generateStructure");
+assert(
+  generateStructure(structureSpec({ seed: "другое" })).primitives.length !== stA.primitives.length ||
+    JSON.stringify(generateStructure(structureSpec({ seed: "другое" }))) !== JSON.stringify(stA),
+  "структуры: другое зерно — другой результат",
+);
+for (const arch of ["cellular", "linear", "radial", "cluster", "open", "mixed"] as const) {
+  const r = generateStructure(structureSpec({ archetype: arch }));
+  const inBounds = (p: { x: number; y: number }) =>
+    p.x >= -600 - 1 && p.x <= 600 + 1 && p.y >= -450 - 1 && p.y <= 450 + 1;
+  assert(
+    r.primitives.filter((p) => p.kind === "area").every((p) => p.kind === "area" && p.points.length >= 3 && p.points.every(inBounds)) &&
+      r.primitives.filter((p) => p.kind === "line").every((p) => p.kind === "line" && p.points.length >= 2),
+    `архетип ${arch}: геометрия валидна и внутри bounds`,
+  );
+}
+assert(stA.stats.nested <= 2, "вложенных локаций не больше nestedCount");
+assert(stA.nested.every((n) => inBoundsST(n)), "позиции вложенных внутри bounds");
+function inBoundsST(n: { x: number; y: number }): boolean {
+  return n.x >= -601 && n.x <= 601 && n.y >= -451 && n.y <= 451;
+}
+assert(
+  stA.primitives.every((p) => !/комнат|коридор|здан|улиц|город|подземель|таверн/i.test(p.name)),
+  "имена структур нейтральные, без сеттинговых слов",
+);
+const stZero = generateStructure(structureSpec({ density: 0, pointDensity: 0, nestedCount: 0, connectivity: 0 }));
+assert(stZero.stats.areas === 0 && stZero.stats.nested === 0, "нулевые параметры — без мусорных примитивов");
+
+// 40. Деривация зерна
+const d1 = deriveSeed("родитель", "маркер-1");
+assert(d1 === deriveSeed("родитель", "маркер-1"), "деривация зерна детерминирована");
+assert(d1 !== deriveSeed("родитель", "маркер-2"), "другой маркер — другое зерно");
+assert(d1 !== deriveSeed("другой-родитель", "маркер-1"), "другой родитель — другое зерно");
+
+// 41. Применение структуры: вложенные карты и пересоздание без дубликатов
+let ps = createProject("Структуры-применение");
+const stSpecBase = {
+  ...structureSpec(),
+  typeMapping: {
+    area: ps.legend.find((t) => t.shape === "area")!.id,
+    line: ps.legend.find((t) => t.shape === "line")!.id,
+    point: ps.legend.find((t) => t.shape === "point")!.id,
+    label: ps.legend.find((t) => t.shape === "label")!.id,
+  },
+  nestedCount: 3,
+};
+const stApply1 = applyStructureToMap(ps, ps.rootMapId, stSpecBase as Parameters<typeof generateStructure>[0]);
+ps = stApply1.project;
+assert(stApply1.mapsCreated === 3 && stApply1.markersCreated === 3, "созданы 3 вложенных маркера и 3 карты");
+const childIds = ps.maps[ps.rootMapId].entities.map((e) => e.targetMapId);
+assert(
+  childIds.every((id) => ps.maps[id]?.createdByGeneration === true && ps.maps[id]?.primitives.length === 0 && ps.maps[id]?.entities.length === 0),
+  "дочерние карты пустые и помечены createdByGeneration",
+);
+assert(ps.maps[ps.rootMapId].generation?.kind === "structure", "generation.kind='structure' записан");
+// Ручная работа во второй вложенной карте
+const workedChild = childIds[1];
+const manualInChild = createPointPrimitive(ps.maps[workedChild], ps.legend.find((t) => t.shape === "point")!.id, 5, 5);
+ps = addPrimitive(ps, workedChild, manualInChild);
+// Перегенерация с другим зерном
+const analysis = analyzeStructureRegen(ps, ps.rootMapId);
+assert(analysis.mapsKept === 1, "анализ: карта с ручной работой будет сохранена");
+assert(analysis.mapsRemoved === 2, "анализ: пустые карты будут удалены");
+const stApply2 = applyStructureToMap(ps, ps.rootMapId, { ...stSpecBase, seed: "структура-2" } as Parameters<typeof generateStructure>[0]);
+ps = stApply2.project;
+assert(!!ps.maps[workedChild], "карта с ручной работой сохранилась");
+assert(
+  ps.maps[ps.rootMapId].entities.some((e) => e.targetMapId === workedChild),
+  "её маркер сохранился",
+);
+const genMarkersNow = ps.maps[ps.rootMapId].entities.filter(
+  (e) => e.origin === "generated" && e.generationId === stApply2.generationId,
+);
+assert(genMarkersNow.length === 3, "после перегенерации ровно 3 маркера нового поколения — дубликатов нет");
+assert(
+  ps.maps[ps.rootMapId].entities.filter((e) => e.origin === "generated").length === 4,
+  "маркер сохранённой карты остался (генерация прежнего поколения) — это корректно",
+);
+assert(!childIds.filter((id) => id !== workedChild).some((id) => ps.maps[id]), "пустые карты прежней генерации удалены");
+const newChildIds = ps.maps[ps.rootMapId].entities.map((e) => e.targetMapId);
+assert(
+  new Set(newChildIds).size === newChildIds.length,
+  "цели маркеров различны — дубликатов карт нет",
+);
+assert(newChildIds.includes(workedChild), "сохранённая карта осталась привязанной к своему маркеру");
+assert(
+  ps.maps[workedChild].primitives.some((p) => p.id === manualInChild.id && p.origin === "manual"),
+  "ручной примитив во вложенной карте не тронут",
+);
+
+// 42. Защита: ручной примитив и заблокированный сгенерированный на основной карте
+const stManual = createLinePrimitive(
+  ps.maps[ps.rootMapId],
+  ps.legend.find((t) => t.shape === "line")!.id,
+  [{ x: 0, y: 0 }, { x: 10, y: 10 }],
+);
+ps = addPrimitive(ps, ps.rootMapId, stManual);
+const stGen = ps.maps[ps.rootMapId].primitives.find((p) => p.origin === "generated")!;
+ps = updatePrimitive(ps, ps.rootMapId, stGen.id, { locked: true });
+const stApply3 = applyStructureToMap(ps, ps.rootMapId, { ...stSpecBase, seed: "структура-3" } as Parameters<typeof generateStructure>[0]);
+ps = stApply3.project;
+assert(ps.maps[ps.rootMapId].primitives.some((p) => p.id === stManual.id && p.origin === "manual"), "ручной примитив пережил перегенерацию структуры");
+assert(ps.maps[ps.rootMapId].primitives.some((p) => p.id === stGen.id && p.locked), "заблокированный сгенерированный примитив не тронут");
+
+// 43. Откат одной записью: undo восстанавливает примитивы, маркеры и карты
+const pu = createProject("Откат-локации");
+const undoSpec = {
+  ...stSpecBase,
+  seed: "структура-4",
+  nestedCount: 2,
+  typeMapping: {
+    area: pu.legend.find((t) => t.shape === "area")!.id,
+    line: pu.legend.find((t) => t.shape === "line")!.id,
+    point: pu.legend.find((t) => t.shape === "point")!.id,
+    label: pu.legend.find((t) => t.shape === "label")!.id,
+  },
+} as Parameters<typeof generateStructure>[0];
+let hs = createHistory(pu);
+const stApply4 = applyStructureToMap(pu, pu.rootMapId, undoSpec);
+const afterApply = stApply4.project;
+hs = record(
+  hs,
+  makeEntry({ operationType: "map.generated", description: "Сгенерирована локация", mapId: pu.rootMapId }, afterApply),
+);
+const undoStep = undo(hs);
+assert(undoStep !== null, "undo доступен");
+const structRestored = undoStep!.project;
+assert(
+  !structRestored.maps[pu.rootMapId].entities.some((e) => e.origin === "generated") &&
+    structRestored.maps[pu.rootMapId].primitives.every((p) => p.origin !== "generated"),
+  "undo: сгенерированные маркеры и примитивы исчезли",
+);
+const createdIds = afterApply.maps[pu.rootMapId].entities.map((e) => e.targetMapId);
+assert(createdIds.length === 2 && createdIds.every((id) => !structRestored.maps[id]), "undo: созданные вложенные карты удалены");
+assert(
+  structRestored.maps[pu.rootMapId].primitives.length === pu.maps[pu.rootMapId].primitives.length &&
+    structRestored.maps[pu.rootMapId].entities.length === pu.maps[pu.rootMapId].entities.length,
+  "undo: состав примитивов и маркеров возвращён",
+);
+const redoStep = redo(undoStep!.history);
+assert(redoStep !== null && !!redoStep.project.maps[createdIds[0]], "redo: вложенные карты восстановлены");
+
+// 44. Миграция: generation без kind (наследие итерации 3, всегда terrain)
+// и без createdByGeneration открывается
+const legacyStruct = JSON.parse(serializeProject(pg)) as Record<string, unknown>;
+const legacyMaps = legacyStruct.maps as Record<string, Record<string, unknown>>;
+for (const m of Object.values(legacyMaps)) {
+  if (m.generation) delete (m.generation as Record<string, unknown>).kind;
+  delete m.createdByGeneration;
+  for (const e of m.entities as Record<string, unknown>[]) delete e.origin;
+}
+const migratedStruct = deserializeProject(JSON.stringify(legacyStruct));
+const structMigratedRoot = migratedStruct.maps[pg.rootMapId];
+assert(structMigratedRoot.generation?.kind === "terrain", "миграция: generation без kind трактуется как terrain");
+assert(
+  structMigratedRoot.entities.every((e) => e.origin === "manual"),
+  "миграция: маркеры без origin получили manual",
+);
+assert(structMigratedRoot.entities.length === pg.maps[pg.rootMapId].entities.length, "миграция: маркеры не потерялись");
+// Спека структуры с kind сохраняется и после сохранения/загрузки
+const roundTripStruct = deserializeSave(serializeSave(ps, afterRewrite));
+assert(
+  roundTripStruct.project.maps[ps.rootMapId].generation?.kind === "structure",
+  "спека структуры с kind переживает сохранение/загрузку",
 );
 
 // 34. Редактирование вершин: перемещение и вставка

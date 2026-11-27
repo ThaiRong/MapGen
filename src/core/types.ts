@@ -50,8 +50,10 @@ export interface MapNode {
   entities: Entity[];
   /** Нарисованные вручную примитивы (итерация 2). */
   primitives: Primitive[];
-  /** Последнее применение генерации на этой карте (итерация 3). */
+  /** Последнее применение генерации на этой карте (итерация 3/4). */
   generation?: MapGeneration;
+  /** Карта создана как вложенная при генерации структуры (итерация 4). */
+  createdByGeneration?: boolean;
   view?: MapView;
   createdAt: string;
   updatedAt: string;
@@ -66,6 +68,9 @@ export interface LocationLinkEntity {
   y: number;
   label: string;
   targetMapId: MapId;
+  /** Происхождение: создан вручную или генерацией структуры (итерация 4). */
+  origin?: PrimitiveOrigin;
+  generationId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -98,10 +103,66 @@ export interface GenerationSpec {
   labels: { enabled: boolean };
 }
 
-export interface MapGeneration {
-  spec: GenerationSpec;
-  generationId: string;
-  appliedAt: number;
+export type MapGeneration =
+  | { kind: "terrain"; spec: GenerationSpec; generationId: string; appliedAt: number }
+  | { kind: "structure"; spec: StructureSpec; generationId: string; appliedAt: number };
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type StructureArchetype = "cellular" | "linear" | "radial" | "cluster" | "open" | "mixed";
+
+/** Сеттинг-агностичная спецификация генерации структуры локации. */
+export interface StructureSpec {
+  seed: string;
+  archetype: StructureArchetype;
+  /** 0..1 — заполнение области */
+  density: number;
+  /** 0..1 — характерный размер элемента */
+  cellScale: number;
+  /** 0..1 — отклонение от регулярности */
+  irregularity: number;
+  /** 0..1 — количество связей */
+  connectivity: number;
+  /** 0..1 — разброс размеров */
+  sizeVariance: number;
+  /** 0..1 — количество узловых точек */
+  pointDensity: number;
+  /** 0..8 — вложенные локации */
+  nestedCount: number;
+  /** 0..1 — отступ от границ */
+  margin: number;
+  /** 0..1 — детализация и упрощение */
+  detail: number;
+  bounds: Rect;
+  typeMapping: { area: string; line: string; point: string; label: string };
+  labels: { enabled: boolean };
+}
+
+export interface StructureNested {
+  x: number;
+  y: number;
+  label: string;
+}
+
+export interface StructureStats {
+  areas: number;
+  lines: number;
+  points: number;
+  labels: number;
+  nested: number;
+  vertices: number;
+}
+
+export interface StructureResult {
+  primitives: Primitive[];
+  nested: StructureNested[];
+  stats: StructureStats;
+  warnings: string[];
 }
 
 /* ---------- Примитивы (итерация 2) ---------- */

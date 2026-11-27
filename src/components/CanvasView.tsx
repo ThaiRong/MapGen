@@ -615,6 +615,25 @@ export default function CanvasView() {
             ctx.fillText(p.text, c.x, c.y);
           }
         }
+        // Вложенные локации предпросмотра — кольца с точкой.
+        for (const n of preview.nested ?? []) {
+          const c = toS({ x: n.x, y: n.y });
+          ctx.globalAlpha = 0.75;
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 7, 0, Math.PI * 2);
+          ctx.strokeStyle = "#4f8cff";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = "#4f8cff";
+          ctx.fill();
+          ctx.font = "11px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(n.label, c.x, c.y - 11);
+        }
         ctx.restore();
       }
 

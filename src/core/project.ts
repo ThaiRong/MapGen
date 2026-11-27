@@ -19,6 +19,7 @@ import {
   type Vec2,
 } from "./types";
 import { generate } from "./generation/generate";
+import { generateStructure } from "./generation/structure/generateStructure";
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -1069,7 +1070,7 @@ export function applyGenerationToMap(
       ...work.maps,
       [mapId]: {
         ...work.maps[mapId],
-        generation: { spec, generationId, appliedAt: Date.now() },
+        generation: { kind: "terrain", spec, generationId, appliedAt: Date.now() },
       },
     },
   });
@@ -1085,6 +1086,229 @@ export function applyGenerationToMap(
       points: result.stats.points,
       labels: result.stats.labels,
     },
+  };
+}
+
+/* ---------- Генерация структур локаций (итерация 4) ---------- */
+
+export interface ApplyStructureResult {
+  project: Project;
+  generationId: string;
+  warnings: string[];
+  added: number;
+  removed: number;
+  markersCreated: number;
+  mapsCreated: number;
+  mapsRemoved: number;
+  mapsKept: number;
+  stats: { areas: number; lines: number; points: number; labels: number; nested: number };
+}
+
+function uniqueLocationLabel(base: string, used: Set<string>): string {
+  if (!used.has(base)) return base;
+  const m = /^(.*?)(\d+)$/.exec(base);
+  const stem = m ? m[1] : `${base} `;
+  let n = m ? Number(m[2]) : 2;
+  let candidate = `${stem}${n}`;
+  while (used.has(candidate)) {
+    n += 1;
+    candidate = `${stem}${n}`;
+  }
+  return candidate;
+}
+
+/** Дочерняя карта пуста для целей перегенерации: нет ручной работы. */
+function isDisposableGeneratedMap(map: MapNode | undefined): boolean {
+  if (!map) return false;
+  if (map.generation) return false;
+  if (map.entities.length > 0) return false;
+  return map.primitives.every((p) => p.origin !== "manual" && !p.locked);
+}
+
+/** Что именно затронет перегенерация структуры на карте (для подтверждения). */
+export function analyzeStructureRegen(
+  project: Project,
+  mapId: MapId,
+): { primitives: number; mapsRemoved: number; mapsKept: number } {
+  const map = project.maps[mapId];
+  if (!map?.generation) return { primitives: 0, mapsRemoved: 0, mapsKept: 0 };
+  const prevId = map.generation.generationId;
+  const primitives = map.primitives.filter(
+    (p) => p.origin === "generated" && p.generationId === prevId && !p.locked,
+  ).length;
+  let mapsRemoved = 0;
+  let mapsKept = 0;
+  for (const e of map.entities) {
+    if (e.origin !== "generated" || e.generationId !== prevId) continue;
+    if (isDisposableGeneratedMap(project.maps[e.targetMapId])) mapsRemoved += 1;
+    else mapsKept += 1;
+  }
+  return { primitives, mapsRemoved, mapsKept };
+}
+
+/**
+ * Применяет генерацию структуры одной транзакцией: заменяет примитивы
+ * прежней генерации (только сгенерированные незаблокированные), создаёт
+ * вложенные маркеры с пустыми дочерними картами (createdByGeneration).
+ * Вложенные маркеры прежней генерации удаляются вместе с картами только
+ * если те полностью пусты; карта с любой работой пользователя сохраняется.
+ */
+export function applyStructureToMap(
+  project: Project,
+  mapId: MapId,
+  spec: import("./types").StructureSpec,
+): ApplyStructureResult {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const result = generateStructure(spec);
+  const warnings: string[] = [...result.warnings];
+  const generationId = newId();
+  const ts = now();
+
+  const resolveType = (kind: PrimitiveKind, typeId: string): string => {
+    const t = legendTypeById(project, typeId);
+    if (t && t.shape === kind) return typeId;
+    const fallback = fallbackTypeForKind(project, kind);
+    if (!fallback) {
+      throw new Error(`В проекте нет типа легенды формы «${kind}» — создайте его вручную`);
+    }
+    warnings.push(
+      `Тип «${typeId || "—"}» не подходит для формы «${kind}» — использован «${fallback.name}»`,
+    );
+    return fallback.id;
+  };
+  const mapping: Record<PrimitiveKind, string> = {
+    area: resolveType("area", spec.typeMapping.area),
+    line: resolveType("line", spec.typeMapping.line),
+    point: resolveType("point", spec.typeMapping.point),
+    label: resolveType("label", spec.typeMapping.label),
+  };
+
+  let current = map;
+  let removed = 0;
+  let mapsRemoved = 0;
+  let mapsKept = 0;
+  if (map.generation) {
+    const prevId = map.generation.generationId;
+    const keptPrimitives = current.primitives.filter((p) => {
+      const drop = p.origin === "generated" && p.generationId === prevId && !p.locked;
+      if (drop) removed += 1;
+      return !drop;
+    });
+    if (keptPrimitives.length !== current.primitives.length) {
+      current = { ...current, primitives: keptPrimitives };
+    }
+    // Вложенные маркеры прежней генерации.
+    const keptEntities: LocationLinkEntity[] = [];
+    for (const e of current.entities) {
+      const isPrev = e.origin === "generated" && e.generationId === prevId;
+      if (!isPrev) {
+        keptEntities.push(e);
+        continue;
+      }
+      if (isDisposableGeneratedMap(project.maps[e.targetMapId])) {
+        mapsRemoved += 1; // карта удаляется ниже, после сбора всех
+      } else {
+        keptEntities.push(e);
+        mapsKept += 1;
+      }
+    }
+    current = { ...current, entities: keptEntities };
+  }
+
+  let work: Project = { ...project, maps: { ...project.maps, [mapId]: current } };
+  // Удаление осиротевших пустых карт прежней генерации.
+  if (map.generation) {
+    const prevId = map.generation.generationId;
+    const mapsCopy = { ...work.maps };
+    let changed = false;
+    for (const e of map.entities) {
+      if (e.origin !== "generated" || e.generationId !== prevId) continue;
+      if (isDisposableGeneratedMap(work.maps[e.targetMapId])) {
+        delete mapsCopy[e.targetMapId];
+        changed = true;
+      }
+    }
+    if (changed) work = { ...work, maps: mapsCopy };
+  }
+
+  let added = 0;
+  for (const src of result.primitives) {
+    const target = work.maps[mapId];
+    const copy = {
+      ...(src as unknown as Record<string, unknown>),
+      id: newId(),
+      name: nextPrimitiveName(target, src.kind),
+      typeId: mapping[src.kind],
+      generationId,
+      createdAt: ts,
+      updatedAt: ts,
+    } as unknown as Primitive;
+    if (
+      (copy.kind === "line" || copy.kind === "area") &&
+      (src.kind === "line" || src.kind === "area")
+    ) {
+      copy.points = src.points.map((pt) => ({ ...pt }));
+    }
+    work = addPrimitive(work, mapId, copy);
+    added += 1;
+  }
+
+  // Вложенные маркеры и пустые дочерние карты.
+  let markersCreated = 0;
+  let mapsCreated = 0;
+  const usedLabels = new Set<string>(work.maps[mapId].entities.map((e) => e.label));
+  for (const n of result.nested) {
+    const child = createMap(n.label, mapId);
+    child.createdByGeneration = true;
+    const label = uniqueLocationLabel(n.label, usedLabels);
+    usedLabels.add(label);
+    const marker: LocationLinkEntity = {
+      id: newId(),
+      kind: "location-link",
+      x: n.x,
+      y: n.y,
+      label,
+      targetMapId: child.id,
+      origin: "generated",
+      generationId,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    const parentMap = work.maps[mapId];
+    work = {
+      ...work,
+      maps: {
+        ...work.maps,
+        [mapId]: { ...parentMap, entities: [...parentMap.entities, marker] },
+        [child.id]: child,
+      },
+    };
+    markersCreated += 1;
+    mapsCreated += 1;
+  }
+
+  work = touch({
+    ...work,
+    maps: {
+      ...work.maps,
+      [mapId]: {
+        ...work.maps[mapId],
+        generation: { kind: "structure", spec, generationId, appliedAt: Date.now() },
+      },
+    },
+  });
+  return {
+    project: work,
+    generationId,
+    warnings,
+    added,
+    removed,
+    markersCreated,
+    mapsCreated,
+    mapsRemoved,
+    mapsKept,
+    stats: result.stats,
   };
 }
 
@@ -1125,7 +1349,13 @@ function validateEntityShape(raw: unknown, where: string): LocationLinkEntity {
   if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) {
     throw new ValidationError(`${where}: повреждены даты сущности`);
   }
-  return raw as unknown as LocationLinkEntity;
+  const entity = raw as unknown as LocationLinkEntity;
+  // Миграция: маркеры до итерации 4 не имеют origin — считаем ручными.
+  entity.origin = raw.origin === "generated" ? "generated" : "manual";
+  if (typeof raw.generationId === "string" && raw.generationId) {
+    entity.generationId = raw.generationId;
+  }
+  return entity;
 }
 
 function validateEntity(raw: unknown, maps: Record<MapId, MapNode>, where: string): LocationLinkEntity {
@@ -1289,8 +1519,10 @@ function validatePrimitives(raw: unknown, legend: LegendType[], where: string): 
 }
 
 /**
- * Проверяет map.generation. Повреждённая спека не роняет загрузку:
- * генерация считается неприменённой (поле отбрасывается).
+ * Проверяет map.generation (union: terrain | structure). Повреждённая
+ * спека не роняет загрузку: генерация считается неприменённой (поле
+ * отбрасывается). Запись без kind — наследие итерации 3, трактуется
+ * как terrain (миграция).
  */
 function tryValidateGeneration(raw: unknown): MapGeneration | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -1300,20 +1532,6 @@ function tryValidateGeneration(raw: unknown): MapGeneration | undefined {
   const spec = raw.spec;
   if (!isRecord(spec)) return undefined;
   const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-  if (typeof spec.seed !== "string") return undefined;
-  if (
-    !num(spec.relief) ||
-    !num(spec.moisture) ||
-    !num(spec.temperature) ||
-    !num(spec.fluidLevel) ||
-    !num(spec.areaDensity) ||
-    !num(spec.lineDensity) ||
-    !num(spec.pointDensity) ||
-    !num(spec.detail) ||
-    !num(spec.fieldScale)
-  ) {
-    return undefined;
-  }
   if (
     !isRecord(spec.bounds) ||
     !num(spec.bounds.x) ||
@@ -1330,7 +1548,51 @@ function tryValidateGeneration(raw: unknown): MapGeneration | undefined {
     if (typeof spec.typeMapping[shape] !== "string") return undefined;
   }
   if (!isRecord(spec.labels) || typeof spec.labels.enabled !== "boolean") return undefined;
-  return raw as unknown as MapGeneration;
+  if (typeof spec.seed !== "string") return undefined;
+
+  const kind = raw.kind === "structure" ? "structure" : "terrain";
+  if (kind === "structure") {
+    const ARCHETYPES = new Set(["cellular", "linear", "radial", "cluster", "open", "mixed"]);
+    if (typeof spec.archetype !== "string" || !ARCHETYPES.has(spec.archetype)) return undefined;
+    if (
+      !num(spec.density) ||
+      !num(spec.cellScale) ||
+      !num(spec.irregularity) ||
+      !num(spec.connectivity) ||
+      !num(spec.sizeVariance) ||
+      !num(spec.pointDensity) ||
+      !num(spec.nestedCount) ||
+      !num(spec.margin) ||
+      !num(spec.detail)
+    ) {
+      return undefined;
+    }
+    return {
+      kind: "structure",
+      spec: spec as unknown as import("./types").StructureSpec,
+      generationId: raw.generationId,
+      appliedAt: raw.appliedAt,
+    };
+  }
+  if (
+    !num(spec.relief) ||
+    !num(spec.moisture) ||
+    !num(spec.temperature) ||
+    !num(spec.fluidLevel) ||
+    !num(spec.areaDensity) ||
+    !num(spec.lineDensity) ||
+    !num(spec.pointDensity) ||
+    !num(spec.detail) ||
+    !num(spec.fieldScale)
+  ) {
+    return undefined;
+  }
+  return {
+    kind: "terrain",
+    spec: spec as unknown as import("./types").GenerationSpec,
+    generationId: raw.generationId,
+    appliedAt: raw.appliedAt,
+  };
 }
 
 export function validateProject(raw: unknown): Project {
