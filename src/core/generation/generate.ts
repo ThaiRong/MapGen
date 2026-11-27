@@ -174,8 +174,10 @@ export function generate(spec: GenerationSpec, opts?: { preview?: boolean }): Ge
   const simplifyEpsilon = cellSize * (0.5 + (1 - spec.detail) * 2.2);
 
   /* ---------- Области: изолинии полей ---------- */
+  // Число уровней полностью управляется areaDensity: при нуле — ни одной
+  // изолинии и ни одного мусорного примитива.
   const areaLevels: { level: number; source: "height" | "moisture" }[] = [];
-  const above = 1 + Math.round(spec.areaDensity * 3); // 1..4 уровня выше порога
+  const above = Math.round(spec.areaDensity * 4); // 0..4 уровня выше порога
   for (let k = 1; k <= above; k += 1) {
     areaLevels.push({ level: spec.fluidLevel + (1 - spec.fluidLevel) * (k / (above + 1)), source: "height" });
   }
@@ -233,21 +235,38 @@ export function generate(spec: GenerationSpec, opts?: { preview?: boolean }): Ge
       }
     }
     maxima.sort((a, b) => b.value - a.value);
-    const minSpacing = cellSize * 6;
+    // Набор семян: сначала локальные максимумы с просторным spacing,
+    // при нехватке — проходы с ослабленным spacing; если максимумов
+    // не хватило вообще, добираем детерминированными случайными точками
+    // на достаточно высоких участках поля.
     const seeds: Vec2[] = [];
-    for (const m of maxima) {
+    let droppedLines = 0;
+    for (const spacingFactor of [6, 2, 0]) {
       if (seeds.length >= lineCount) break;
-      const w: Vec2 = {
-        x: bounds.x + (m.i / res) * bounds.width,
-        y: bounds.y + (m.j / res) * bounds.height,
-      };
-      if (seeds.every((s) => Math.hypot(s.x - w.x, s.y - w.y) >= minSpacing)) {
+      const minSpacing = cellSize * spacingFactor;
+      for (const m of maxima) {
+        if (seeds.length >= lineCount) break;
+        const w: Vec2 = {
+          x: bounds.x + (m.i / res) * bounds.width,
+          y: bounds.y + (m.j / res) * bounds.height,
+        };
+        if (seeds.some((s) => Math.hypot(s.x - w.x, s.y - w.y) < minSpacing)) continue;
         seeds.push(w);
       }
     }
+    let attempts = 0;
+    while (seeds.length < lineCount && attempts < lineCount * 30) {
+      attempts += 1;
+      const w: Vec2 = {
+        x: bounds.x + rng() * bounds.width,
+        y: bounds.y + rng() * bounds.height,
+      };
+      if (heightAt(w.x, w.y, worldScale, fieldOpts) < 0.45) continue;
+      if (seeds.some((s) => Math.hypot(s.x - w.x, s.y - w.y) < cellSize * 2)) continue;
+      seeds.push(w);
+    }
 
     const gradientStep = cellSize;
-    let droppedLines = 0;
     for (const seed of seeds) {
       const pts: Vec2[] = [{ x: seed.x, y: seed.y }];
       let px = seed.x;

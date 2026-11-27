@@ -728,11 +728,11 @@ const baseGenSpec = {
   moisture: 0.5,
   temperature: 0,
   fluidLevel: 0.42,
-  areaDensity: 0.5,
+  areaDensity: 0.6,
   lineDensity: 0.4,
   pointDensity: 0.5,
   detail: 0.5,
-  fieldScale: 1,
+  fieldScale: 2,
   bounds: { x: -500, y: -400, width: 1000, height: 800 },
   typeMapping: {
     area: pr.legend.find((t) => t.shape === "area")!.id,
@@ -752,6 +752,12 @@ assert(
   JSON.stringify(genA) === JSON.stringify(genB),
   "детерминизм: два вызова generate с одним spec — побайтово идентичный результат",
 );
+assert(genA.stats.areas > 0, "области генерируются (замкнутые контуры поля)");
+assert(
+  genA.primitives.filter((p) => p.kind === "area").every((p) => p.points.length >= 3),
+  "у каждой области минимум 3 вершины",
+);
+assert(genA.stats.lines >= 8, "линий заметно больше, чем пара штук (плотность соблюдается)");
 const genC = generate(genSpec({ seed: "другое-зерно" }));
 assert(
   JSON.stringify(genA) !== JSON.stringify(genC),

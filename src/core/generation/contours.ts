@@ -106,41 +106,49 @@ export function marchingSquares(
 }
 
 /**
- * Соединяет сегменты в контуры. Возвращает только замкнутые
- * (первая точка совпадает с последней); незамкнутые (уходящие
- * за границу сетки) отбрасываются.
+ * Соединяет сегменты в контуры. Обход неориентированный: сегмент
+ * присоединяется по любому совпадающему концу (при нужде — разворачиваясь),
+ * потому что соседние ячейки marching squares не гарантируют одинаковую
+ * ориентацию рёбер. Возвращает только замкнутые контуры.
  */
 export function chainClosedContours(segments: Segment[]): Vec2[][] {
-  // Индекс точек с округлением — соединяем совпадающие концы.
   const key = (p: Vec2): string => `${Math.round(p.x * 4)},${Math.round(p.y * 4)}`;
-  const byStart = new Map<string, { seg: Segment; used: boolean }[]>();
-  for (const seg of segments) {
-    const k = key(seg.a);
-    const list = byStart.get(k) ?? [];
-    list.push({ seg, used: false });
-    byStart.set(k, list);
+  interface Entry {
+    seg: Segment;
+    used: boolean;
+  }
+  const entries: Entry[] = segments.map((seg) => ({ seg, used: false }));
+  const byPoint = new Map<string, Entry[]>();
+  for (const e of entries) {
+    for (const pt of [e.seg.a, e.seg.b]) {
+      const k = key(pt);
+      const list = byPoint.get(k) ?? [];
+      list.push(e);
+      byPoint.set(k, list);
+    }
   }
 
   const loops: Vec2[][] = [];
-  for (const entry of segments.map((seg) => ({ seg, used: false }))) {
-    if (entry.used) continue;
-    entry.used = true;
-    const loop: Vec2[] = [entry.seg.a, entry.seg.b];
+  for (const start of entries) {
+    if (start.used) continue;
+    start.used = true;
+    const loop: Vec2[] = [start.seg.a, start.seg.b];
     let guard = 0;
     for (;;) {
       guard += 1;
-      if (guard > 100000) break;
+      if (guard > 200000) break;
       const tail = loop[loop.length - 1];
-      if (key(tail) === key(loop[0])) break; // замкнулся
-      const candidates = byStart.get(key(tail));
+      if (key(tail) === key(loop[0])) {
+        // Вернулись в начало — замкнутый контур.
+        loop.pop();
+        if (loop.length >= 3) loops.push(loop);
+        break;
+      }
+      const candidates = byPoint.get(key(tail));
       const next = candidates?.find((c) => !c.used);
-      if (!next) break;
+      if (!next) break; // разомкнутый (уходит за границу сетки) — отбрасываем
       next.used = true;
-      loop.push(next.seg.b);
-    }
-    if (loop.length >= 4 && key(loop[loop.length - 1]) === key(loop[0])) {
-      loop.pop(); // последняя точка дублирует первую
-      loops.push(loop);
+      loop.push(key(next.seg.a) === key(tail) ? next.seg.b : next.seg.a);
     }
   }
   return loops;

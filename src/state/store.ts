@@ -500,6 +500,9 @@ export const useAppStore = create<AppState>()((set, get) => {
         selectedEntityId: null,
         selectedPrimitiveIds: [],
         labelDraft: null,
+        // Предпросмотр принадлежит конкретной карте — не тащим его на другую.
+        generationPreview: null,
+        generationBoundsRect: null,
         status: `Открыта карта «${project.maps[id].name}»`,
       });
     },
@@ -528,6 +531,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         drawingDraft: null,
         labelDraft: null,
         selectedTypeId: null,
+        generationPreview: null,
+        generationBoundsRect: null,
         tool: "select",
         history,
         branchConfirm: null,
