@@ -171,36 +171,59 @@ export function generate(spec: GenerationSpec, opts?: { preview?: boolean }): Ge
     idCounter += 1;
     return `gen-${idCounter}`;
   };
-  const simplifyEpsilon = cellSize * (0.5 + (1 - spec.detail) * 2.2);
+  // Упрощение — умеренное и зависящее от детализации слабо: низкая
+  // детализация не должна «съедать» мелкие замкнутые контуры.
+  const simplifyEpsilon = cellSize * (0.35 + (1 - spec.detail) * 0.5);
 
   /* ---------- Области: изолинии полей ---------- */
+  // Уровни нормированы к фактическому диапазону поля высот: при гладком
+  // поле (малый масштаб/детализация) абсолютные значения часто лежали бы
+  // вне диапазона и не давали бы ни одного контура.
+  let hMin = Infinity;
+  let hMax = -Infinity;
+  for (const v of heightGrid) {
+    if (v < hMin) hMin = v;
+    if (v > hMax) hMax = v;
+  }
+  const hRange = Math.max(1e-6, hMax - hMin);
+  const levelOf = (t: number) => hMin + Math.min(0.97, Math.max(0.03, t)) * hRange;
+
   // Число уровней полностью управляется areaDensity: при нуле — ни одной
   // изолинии и ни одного мусорного примитива.
-  const areaLevels: { level: number; source: "height" | "moisture" }[] = [];
+  const areaLevels: { t: number; source: "height" | "moisture" }[] = [];
   const above = Math.round(spec.areaDensity * 4); // 0..4 уровня выше порога
   for (let k = 1; k <= above; k += 1) {
-    areaLevels.push({ level: spec.fluidLevel + (1 - spec.fluidLevel) * (k / (above + 1)), source: "height" });
+    areaLevels.push({ t: spec.fluidLevel + (1 - spec.fluidLevel) * (k / (above + 1)), source: "height" });
   }
   const below = Math.round(spec.areaDensity * 2); // 0..2 ниже порога
   for (let k = 1; k <= below; k += 1) {
-    areaLevels.push({ level: spec.fluidLevel * (k / (below + 1)), source: "height" });
+    areaLevels.push({ t: spec.fluidLevel * (k / (below + 1)), source: "height" });
   }
   if (spec.areaDensity > 0.4) {
-    areaLevels.push({ level: 0.5, source: "moisture" });
+    areaLevels.push({ t: 0.5, source: "moisture" });
   }
 
   const areaPolygons: { points: Vec2[]; source: "height" | "moisture"; level: number }[] = [];
-  for (const { level, source } of areaLevels) {
+  for (const { t, source } of areaLevels) {
     const grid = source === "height" ? heightGrid : moistureGrid;
+    const level = source === "height" ? levelOf(t) : t;
     const segments = marchingSquares(grid, res, bounds, level);
     const loops = chainClosedContours(segments);
     for (const loop of loops) {
       const simplified = douglasPeucker(loop, simplifyEpsilon);
-      if (simplified.length < 3) continue;
-      areaPolygons.push({ points: capVertices(simplified, simplifyEpsilon, warnings), source, level });
+      // Защита от коллапса: упрощение не должно «съесть» контур
+      // целиком — тогда берём исходную замкнутую цепочку.
+      const finalPoints = simplified.length >= 3 ? simplified : loop;
+      if (finalPoints.length < 3) continue;
+      areaPolygons.push({ points: capVertices(finalPoints, simplifyEpsilon, warnings), source, level: t });
     }
   }
   areaPolygons.sort((a, b) => polygonArea(b.points) - polygonArea(a.points));
+  if (spec.areaDensity > 0 && areaPolygons.length === 0) {
+    warnings.push(
+      "Замкнутых контуров не найдено: при таком масштабе поля структуры касаются границы области. Увеличьте «Масштаб поля» или «Плотность областей».",
+    );
+  }
   let droppedAreas = 0;
   for (const poly of areaPolygons) {
     if (primitives.filter((p) => p.kind === "area").length >= MAX_AREAS) {

@@ -757,6 +757,8 @@ assert(
   genA.primitives.filter((p) => p.kind === "area").every((p) => p.points.length >= 3),
   "у каждой области минимум 3 вершины",
 );
+const genLowDetail = generate(genSpec({ detail: 0.2 }));
+assert(genLowDetail.stats.areas > 0, "области генерируются и на низкой детализации");
 assert(genA.stats.lines >= 8, "линий заметно больше, чем пара штук (плотность соблюдается)");
 const genC = generate(genSpec({ seed: "другое-зерно" }));
 assert(
