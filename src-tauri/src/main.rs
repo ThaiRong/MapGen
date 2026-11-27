@@ -10,6 +10,10 @@ fn main() {
             commands::load_project,
             commands::save_autosave,
             commands::load_autosave,
+            commands::profile_list,
+            commands::profile_read,
+            commands::profile_write,
+            commands::profile_delete,
         ])
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {

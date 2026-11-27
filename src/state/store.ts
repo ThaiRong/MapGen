@@ -5,6 +5,7 @@ import {
   addLocation,
   addPrimitive,
   applyGenerationToMap,
+  applyProfileToProject as applyProfileToProjectCore,
   applyStructureToMap,
   clearMarkerArchive,
   createAreaPrimitive,
@@ -18,6 +19,7 @@ import {
   deleteMarker,
   deletePrimitive,
   deletePrimitives,
+  detachProfile as detachProfileCore,
   fallbackTypeForKind,
   findPrimitive,
   insertPrimitiveCopy,
@@ -37,6 +39,7 @@ import {
   rotatePrimitive,
   setMapScale,
   setMapView,
+  setMarkerKind,
   updateLegendType,
   updatePrimitive,
   ValidationError,
@@ -57,16 +60,33 @@ import type {
   EntityId,
   GenerationSpec,
   LegendShape,
+  LocationKind,
   LocationLinkEntity,
   MapId,
   MapScale,
   MapView,
   Primitive,
   Project,
+  SettingProfile,
   StructureSpec,
   Vec2,
 } from "../core/types";
 import { deriveSeed } from "../core/generation/structure/rng";
+import {
+  createEmptyProfile,
+  validateSettingProfile,
+  type ProfileValidationResult,
+} from "../core/profiles";
+import {
+  deleteProfile,
+  exportProfileToFile,
+  importProfileFromFile,
+  listProfiles,
+  readProfile,
+  UserCancelledProfile,
+  writeProfile,
+  type ProfileMeta,
+} from "../storage/profiles";
 import { UserCancelledError } from "../storage/interface";
 import { createStorage } from "../storage/tauri";
 
@@ -91,6 +111,38 @@ export interface LabelDraft {
 }
 
 const storage = createStorage();
+
+/**
+ * Профиль итерации 5: проект самодостаточен за счёт снапшота.
+ * Если снапшота нет, а activeProfileId есть — пробуем подтянуть профиль
+ * из библиотеки. Если файла в библиотеке нет — ненавязчивое уведомление,
+ * работа продолжается на снапшоте.
+ */
+async function ensureProfileSnapshot(project: Project): Promise<Project> {
+  if (!project.activeProfileId) return project;
+  try {
+    const raw = await readProfile(project.activeProfileId);
+    const { profile } = validateSettingProfile(JSON.parse(raw));
+    if (!project.profileSnapshot) {
+      useAppStore.setState({
+        status: `Профиль «${profile.name}» подтянут из библиотеки и встроен в проект (снапшот)`,
+      });
+      return { ...project, profileSnapshot: profile };
+    }
+    return project;
+  } catch {
+    if (project.profileSnapshot) {
+      useAppStore.setState({
+        status: `Файл профиля «${project.activeProfileId}» не найден в библиотеке — проект работает на встроенном снапшоте`,
+      });
+    } else {
+      useAppStore.setState({
+        status: "Активный профиль отсутствует и в проекте, и в библиотеке — доступны только нейтральные средства генерации",
+      });
+    }
+    return project;
+  }
+}
 
 function sanitize(
   project: Project,
@@ -199,7 +251,23 @@ export interface AppState {
   setGenerationMode: (mode: "terrain" | "structure") => void;
   /** Деривация зерна для панели локации (устанавливается из инспектора маркера). */
   structureSeedPreset: string | null;
+  /** Вид локации из инспектора маркера — предзаполняет панель. */
+  structureKindPreset: LocationKind | null;
   openLocationGeneration: (targetMapId: MapId, markerId: EntityId) => void;
+  setMarkerKindById: (mapId: MapId, entityId: EntityId, kindId: string | undefined) => void;
+
+  /* Профили сеттинга (итерация 5) */
+  profilesList: ProfileMeta[];
+  profilesLoaded: boolean;
+  refreshProfiles: () => Promise<void>;
+  createProfile: (name: string) => Promise<string | null>;
+  duplicateProfileById: (id: string) => Promise<void>;
+  deleteProfileById: (id: string) => Promise<void>;
+  importProfile: () => Promise<void>;
+  exportProfile: (id: string) => Promise<void>;
+  saveProfile: (profile: SettingProfile) => Promise<void>;
+  applyProfileById: (id: string) => void;
+  detachActiveProfile: (keepSnapshot: boolean) => void;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -367,6 +435,9 @@ export const useAppStore = create<AppState>()((set, get) => {
     generationBoundsRect: null,
     generationMode: "terrain" as const,
     structureSeedPreset: null,
+    structureKindPreset: null,
+    profilesList: [],
+    profilesLoaded: false,
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -489,7 +560,7 @@ export const useAppStore = create<AppState>()((set, get) => {
             result.project,
             {
               operationType: "map.generated",
-              description: `Сгенерирована местность: ${result.stats.areas} областей, ${result.stats.lines} линий, ${result.stats.points} точек`,
+              description: `Сгенерирована местность${spec.kindName ? ` (вид «${spec.kindName}»)` : ""}: ${result.stats.areas} областей, ${result.stats.lines} линий, ${result.stats.points} точек`,
               mapId: activeMapId,
             },
             `Генерация применена: добавлено ${result.added}, заменено ${result.removed}.${warnText}`,
@@ -525,7 +596,7 @@ export const useAppStore = create<AppState>()((set, get) => {
             result.project,
             {
               operationType: "map.generated",
-              description: `Сгенерирована локация: ${result.stats.areas} областей, ${result.stats.lines} связей, ${result.stats.points} узлов, ${result.stats.nested} вложенные локации`,
+              description: `Сгенерирована локация${spec.kindName ? ` (вид «${spec.kindName}»)` : ""}: ${result.stats.areas} областей, ${result.stats.lines} связей, ${result.stats.points} узлов, ${result.stats.nested} вложенные локации`,
               mapId: activeMapId,
             },
             `Локация сгенерирована: примитивов добавлено ${result.added}, заменено ${result.removed}; вложенных маркеров создано ${result.markersCreated}, карт создано ${result.mapsCreated}, удалено пустых ${result.mapsRemoved}, сохранено с содержимым ${result.mapsKept}.${warnText}`,
@@ -548,12 +619,175 @@ export const useAppStore = create<AppState>()((set, get) => {
       const parentSeed = parentGen?.spec.seed ?? "зерно-1";
       const marker = project.maps[parent]?.entities.find((e) => e.id === markerId);
       const seed = marker ? deriveSeed(parentSeed, marker.id) : deriveSeed(parentSeed, markerId);
+      const profile = project.profileSnapshot;
+      const kind = marker?.kindId ? profile?.locationKinds.find((k) => k.id === marker.kindId) : undefined;
       get().openMap(targetMapId);
       set({
         generationMode: "structure",
         structureSeedPreset: seed,
-        status: `Панель генерации локации открыта. Зерно выведено из родительской карты: ${seed}`,
+        structureKindPreset: kind ?? null,
+        status: kind
+          ? `Панель генерации локации открыта. Вид: «${kind.name}», зерно: ${seed}`
+          : `Панель генерации локации открыта. Зерно выведено из родительской карты: ${seed}`,
       });
+    },
+
+    setMarkerKindById: (mapId, entityId, kindId) => {
+      const { project } = get();
+      const marker = project.maps[mapId]?.entities.find((e) => e.id === entityId);
+      if (!marker) return;
+      apply(
+        setMarkerKind(project, mapId, entityId, kindId),
+        {
+          operationType: "marker.kindChanged",
+          description: kindId
+            ? `Маркеру «${marker.label}» назначен вид локации`
+            : `У маркера «${marker.label}» снят вид локации`,
+          mapId,
+          entityId,
+        },
+        kindId
+          ? "Вид локации назначен — «Сгенерировать локацию» использует его параметры"
+          : "Вид локации снят",
+      );
+    },
+
+    refreshProfiles: async () => {
+      try {
+        const list = await listProfiles();
+        set({ profilesList: list, profilesLoaded: true });
+      } catch (e) {
+        set({
+          profilesLoaded: true,
+          status: e instanceof Error ? `Не удалось прочитать библиотеку профилей: ${e.message}` : "Ошибка библиотеки профилей",
+        });
+      }
+    },
+
+    createProfile: async (name) => {
+      try {
+        const profile = createEmptyProfile(name);
+        await writeProfile(profile.id, JSON.stringify(profile, null, 2));
+        await get().refreshProfiles();
+        set({ status: `Профиль «${profile.name}» создан — пустой, наполните его в редакторе` });
+        return profile.id;
+      } catch (e) {
+        set({ status: e instanceof Error ? `Не удалось создать профиль: ${e.message}` : "Не удалось создать профиль" });
+        return null;
+      }
+    },
+
+    duplicateProfileById: async (id) => {
+      try {
+        const raw = await readProfile(id);
+        const parsed: ProfileValidationResult = validateSettingProfile(JSON.parse(raw));
+        const copy = {
+          ...parsed.profile,
+          id: crypto.randomUUID(),
+          name: `${parsed.profile.name} (копия)`,
+          updatedAt: Date.now(),
+        };
+        await writeProfile(copy.id, JSON.stringify(copy, null, 2));
+        await get().refreshProfiles();
+        set({ status: `Профиль продублирован: «${copy.name}»` });
+      } catch (e) {
+        if (e instanceof UserCancelledProfile) return;
+        set({ status: e instanceof Error ? `Не удалось продублировать профиль: ${e.message}` : "Ошибка дублирования" });
+      }
+    },
+
+    deleteProfileById: async (id) => {
+      try {
+        await deleteProfile(id);
+        await get().refreshProfiles();
+        set({ status: "Профиль удалён из библиотеки. Если он был применён к проекту, проект продолжит работать на снапшоте" });
+      } catch (e) {
+        set({ status: e instanceof Error ? `Не удалось удалить профиль: ${e.message}` : "Ошибка удаления профиля" });
+      }
+    },
+
+    importProfile: async () => {
+      try {
+        const raw = await importProfileFromFile();
+        const parsed = validateSettingProfile(JSON.parse(raw));
+        const { profile, warnings } = parsed;
+        // Конфликт id решается новым id — существующие профили не затираются.
+        const existing = get().profilesList.some((p) => p.id === profile.id);
+        const finalProfile = existing ? { ...profile, id: crypto.randomUUID() } : profile;
+        await writeProfile(finalProfile.id, JSON.stringify(finalProfile, null, 2));
+        await get().refreshProfiles();
+        set({
+          status:
+            `Профиль «${finalProfile.name}» импортирован${existing ? " (назначен новый id из-за конфликта)" : ""}` +
+            (warnings.length > 0 ? `. Предупреждения: ${warnings.join("; ")}` : ""),
+        });
+      } catch (e) {
+        if (e instanceof UserCancelledProfile) return;
+        set({ status: e instanceof Error ? `Импорт профиля не удался: ${e.message}` : "Импорт профиля не удался" });
+      }
+    },
+
+    exportProfile: async (id) => {
+      try {
+        const raw = await readProfile(id);
+        const meta = get().profilesList.find((p) => p.id === id);
+        await exportProfileToFile(id, meta?.name ?? id, raw);
+        set({ status: "Профиль экспортирован" });
+      } catch (e) {
+        if (e instanceof UserCancelledProfile) return;
+        set({ status: e instanceof Error ? `Экспорт профиля не удался: ${e.message}` : "Экспорт профиля не удался" });
+      }
+    },
+
+    saveProfile: async (profile) => {
+      try {
+        const next = { ...profile, updatedAt: Date.now() };
+        await writeProfile(next.id, JSON.stringify(next, null, 2));
+        await get().refreshProfiles();
+        set({ status: `Профиль «${next.name}» сохранён в библиотеке. Проект не изменён — примените профиль отдельно` });
+      } catch (e) {
+        set({ status: e instanceof Error ? `Не удалось сохранить профиль: ${e.message}` : "Ошибка сохранения профиля" });
+        throw e;
+      }
+    },
+
+    applyProfileById: (id) => {
+      void (async () => {
+        try {
+          const raw = await readProfile(id);
+          const { profile, warnings } = validateSettingProfile(JSON.parse(raw));
+          const { project } = get();
+          const result = applyProfileToProjectCore(project, profile);
+          withBranchGuard(() => {
+            applyNow(
+              result.project,
+              {
+                operationType: "profile.applied",
+                description: `Применён профиль «${profile.name}»: добавлено ${result.added} типов, обновлено ${result.updated}`,
+              },
+              `Профиль «${profile.name}» применён: добавлено типов ${result.added}, обновлено ${result.updated}, без изменений ${result.unchanged}` +
+                (warnings.length > 0 ? `. Предупреждения профиля: ${warnings.join("; ")}` : ""),
+            );
+          });
+        } catch (e) {
+          set({ status: e instanceof Error ? e.message : "Не удалось применить профиль" });
+        }
+      })();
+    },
+
+    detachActiveProfile: (keepSnapshot) => {
+      const { project } = get();
+      if (!project.activeProfileId) return;
+      apply(
+        detachProfileCore(project, keepSnapshot),
+        {
+          operationType: "profile.applied",
+          description: "Профиль отключён от проекта",
+        },
+        keepSnapshot
+          ? "Профиль отключён. Типы и примитивы сохранены; снапшот оставлен для воспроизводимости"
+          : "Профиль отключён, снапшот удалён. Типы и примитивы сохранены",
+      );
     },
 
     openMap: (id) => {
@@ -1378,7 +1612,8 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     openProject: async () => {
       try {
-        const { project, history: loadedHistory, path } = await storage.loadFromFile();
+        const { project: loaded, history: loadedHistory, path } = await storage.loadFromFile();
+        const project = await ensureProfileSnapshot(loaded);
         const history = loadedHistory ?? (() => {
           const h = createHistory(project);
           return record(
@@ -1425,7 +1660,8 @@ export async function initApp(): Promise<void> {
   try {
     const saved = await storage.loadAutosave();
     if (saved) {
-      const { project, history: loadedHistory } = saved;
+      const { project: loaded, history: loadedHistory } = saved;
+      const project = await ensureProfileSnapshot(loaded);
       const { activeMapId } = useAppStore.getState();
       const history = loadedHistory ?? (() => {
         const h = createHistory(project);

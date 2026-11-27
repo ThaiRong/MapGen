@@ -20,6 +20,7 @@ import {
 } from "./types";
 import { generate } from "./generation/generate";
 import { generateStructure } from "./generation/structure/generateStructure";
+import { nameFor, validateSettingProfile } from "./profiles";
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -155,8 +156,49 @@ export function renameMarker(
       [mapId]: {
         ...map,
         updatedAt: ts,
+        entities: map.entities.map((e) => {
+          if (e.id !== entityId) return e;
+          // Переименованный сгенерированный маркер выходит из-под
+          // управления генерации и переживёт перегенерацию.
+          const renamed = e.origin === "generated" && trimmed !== e.label;
+          return {
+            ...e,
+            label: trimmed,
+            updatedAt: ts,
+            ...(renamed ? { origin: "manual" as const } : null),
+          };
+        }),
+      },
+    },
+  });
+}
+
+/** Задаёт маркеру вид локации из профиля (итерация 5). */
+export function setMarkerKind(
+  project: Project,
+  mapId: MapId,
+  entityId: EntityId,
+  kindId: string | undefined,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const ts = now();
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: {
+        ...map,
+        updatedAt: ts,
         entities: map.entities.map((e) =>
-          e.id === entityId ? { ...e, label: trimmed, updatedAt: ts } : e,
+          e.id === entityId
+            ? {
+                ...e,
+                kindId,
+                updatedAt: ts,
+                ...(e.origin === "generated" ? { origin: "manual" as const } : null),
+              }
+            : e,
         ),
       },
     },
@@ -533,6 +575,39 @@ function nextPrimitiveName(map: MapNode, kind: PrimitiveKind): string {
   return `${PRIMITIVE_BASE_NAME[kind]} ${count + 1}`;
 }
 
+/**
+ * Неймер для генерации: применяет правила именования из спеки
+ * (детерминированно от seed), с фолбэком на нейтральный счётчик;
+ * гарантирует уникальность имён в пределах карты.
+ */
+function makeNamer(
+  specNaming: import("./types").SpecNaming | undefined,
+  seed: string,
+  map: MapNode,
+): (kind: PrimitiveKind | "location") => string {
+  const used = new Set<string>([
+    ...map.primitives.map((p) => p.name),
+    ...map.entities.map((e) => e.label),
+  ]);
+  const indexes: Record<string, number> = {};
+  return (kind) => {
+    const key = kind;
+    indexes[key] = (indexes[key] ?? 0) + 1;
+    const index = indexes[key];
+    let candidate = nameFor(specNaming, kind, seed, index, () =>
+      kind === "location" ? "Локация" : nextPrimitiveName(map, kind),
+    );
+    if (kind === "location" && candidate === "Локация") candidate = `Локация ${index}`;
+    let guard = 0;
+    while (used.has(candidate) && guard < 50) {
+      guard += 1;
+      candidate = `${candidate}·${guard}`;
+    }
+    used.add(candidate);
+    return candidate;
+  };
+}
+
 function primitiveBase(map: MapNode, kind: PrimitiveKind, typeId: string) {
   const ts = now();
   return {
@@ -901,6 +976,11 @@ export function updatePrimitive(
     if (patch.name !== undefined) next.name = patch.name.trim() || p.name;
     if (patch.text !== undefined) next.text = patch.text;
     if (patch.fontSize !== undefined) next.fontSize = Math.max(8, Math.min(72, patch.fontSize));
+    // Переименованный сгенерированный примитив выходит из-под управления
+    // генерации: ручное имя не перетирается перегенерацией.
+    if (patch.name !== undefined && p.origin === "generated" && next.name !== p.name) {
+      next.origin = "manual";
+    }
     return next;
   };
   // Не трогаем проект, если патч ничего не меняет (blur без изменений
@@ -1043,12 +1123,12 @@ export function applyGenerationToMap(
 
   let work: Project = { ...project, maps: { ...project.maps, [mapId]: current } };
   let added = 0;
+  const namer = makeNamer(spec.naming, spec.seed, work.maps[mapId]);
   for (const src of result.primitives) {
-    const target = work.maps[mapId];
     const copy = {
       ...(src as unknown as Record<string, unknown>),
       id: newId(),
-      name: nextPrimitiveName(target, src.kind),
+      name: namer(src.kind),
       typeId: mapping[src.kind],
       generationId,
       createdAt: ts,
@@ -1087,6 +1167,120 @@ export function applyGenerationToMap(
       labels: result.stats.labels,
     },
   };
+}
+
+/* ---------- Профили сеттинга (итерация 5) ---------- */
+
+export interface ProfileApplyPreview {
+  added: number;
+  updated: number;
+  unchanged: number;
+  /** Конфликты, блокирующие применение: тип используется и меняет shape. */
+  conflicts: string[];
+}
+
+/** Предпросмотр применения профиля: что добавится, обновится, конфликты. */
+export function previewProfileApplication(project: Project, profile: import("./types").SettingProfile): ProfileApplyPreview {
+  const conflicts: string[] = [];
+  let added = 0;
+  let updated = 0;
+  let unchanged = 0;
+  for (const type of profile.legendTypes) {
+    const existing = legendTypeById(project, type.id);
+    if (!existing) {
+      added += 1;
+      continue;
+    }
+    if (existing.shape !== type.shape) {
+      const usage = countLegendTypeUsage(project, type.id);
+      if (usage > 0) {
+        conflicts.push(
+          `Тип «${existing.name}» используется ${usage} примитивами — профиль меняет его форму с «${existing.shape}» на «${type.shape}». Переназначьте примитивы или удалите тип из профиля.`,
+        );
+        continue;
+      }
+      updated += 1; // не используется — shape менять можно
+      continue;
+    }
+    const sameStyle =
+      existing.name === type.name &&
+      existing.category === type.category &&
+      existing.color === type.color &&
+      existing.opacity === type.opacity &&
+      existing.strokeWidth === type.strokeWidth &&
+      existing.strokeStyle === type.strokeStyle &&
+      existing.visible === type.visible;
+    if (sameStyle) unchanged += 1;
+    else updated += 1;
+  }
+  return { added, updated, unchanged, conflicts };
+}
+
+export interface ApplyProfileResult {
+  project: Project;
+  added: number;
+  updated: number;
+  unchanged: number;
+}
+
+/**
+ * Применяет профиль к проекту: типы добавляются по id, при совпадении
+ * обновляется стиль и имя; типы проекта вне профиля сохраняются;
+ * примитивы, маркеры и карты не трогаются. Снапшот профиля встраивается
+ * в проект — воспроизводимость не зависит от библиотеки.
+ */
+export function applyProfileToProject(
+  project: Project,
+  profile: import("./types").SettingProfile,
+): ApplyProfileResult {
+  const preview = previewProfileApplication(project, profile);
+  if (preview.conflicts.length > 0) {
+    throw new ValidationError(preview.conflicts.join("\n"));
+  }
+  const ts = now();
+  const byId = new Map(project.legend.map((t) => [t.id, t]));
+  const legend: LegendType[] = project.legend.map((t) => {
+    const incoming = profile.legendTypes.find((p) => p.id === t.id);
+    if (!incoming) return t;
+    return {
+      ...t,
+      name: incoming.name,
+      category: incoming.category,
+      color: incoming.color,
+      opacity: incoming.opacity,
+      strokeWidth: incoming.strokeWidth,
+      strokeStyle: incoming.strokeStyle,
+      visible: incoming.visible,
+      shape: incoming.shape,
+      updatedAt: ts,
+    };
+  });
+  for (const incoming of profile.legendTypes) {
+    if (!byId.has(incoming.id)) {
+      legend.push({ ...incoming, createdAt: ts, updatedAt: ts });
+    }
+  }
+  const snapshot = JSON.parse(JSON.stringify(profile)) as import("./types").SettingProfile;
+  return {
+    project: touch({
+      ...project,
+      legend,
+      activeProfileId: profile.id,
+      profileSnapshot: snapshot,
+    }),
+    added: preview.added,
+    updated: preview.updated,
+    unchanged: preview.unchanged,
+  };
+}
+
+/** Отключение профиля: activeProfileId снимается, типы и примитивы целы. */
+export function detachProfile(project: Project, keepSnapshot: boolean): Project {
+  return touch({
+    ...project,
+    activeProfileId: undefined,
+    profileSnapshot: keepSnapshot ? project.profileSnapshot : undefined,
+  });
 }
 
 /* ---------- Генерация структур локаций (итерация 4) ---------- */
@@ -1233,12 +1427,12 @@ export function applyStructureToMap(
   }
 
   let added = 0;
+  const namer = makeNamer(spec.naming, spec.seed, work.maps[mapId]);
   for (const src of result.primitives) {
-    const target = work.maps[mapId];
     const copy = {
       ...(src as unknown as Record<string, unknown>),
       id: newId(),
-      name: nextPrimitiveName(target, src.kind),
+      name: namer(src.kind),
       typeId: mapping[src.kind],
       generationId,
       createdAt: ts,
@@ -1261,7 +1455,7 @@ export function applyStructureToMap(
   for (const n of result.nested) {
     const child = createMap(n.label, mapId);
     child.createdByGeneration = true;
-    const label = uniqueLocationLabel(n.label, usedLabels);
+    const label = uniqueLocationLabel(namer("location"), usedLabels);
     usedLabels.add(label);
     const marker: LocationLinkEntity = {
       id: newId(),
@@ -1272,6 +1466,7 @@ export function applyStructureToMap(
       targetMapId: child.id,
       origin: "generated",
       generationId,
+      ...(spec.nestedKindId ? { kindId: spec.nestedKindId } : null),
       createdAt: ts,
       updatedAt: ts,
     };
@@ -1600,11 +1795,14 @@ export function validateProject(raw: unknown): Project {
   if (raw.format !== PROJECT_FORMAT) {
     throw new ValidationError("Файл не является проектом MapGen (нет метки формата)");
   }
-  if (raw.version !== PROJECT_VERSION) {
+  // Миграция: проекты формата v1 (до профилей) открываются и далее
+  // сохраняются уже как v2. Идемпотентно: v2 проходит без изменений.
+  if (raw.version !== PROJECT_VERSION && raw.version !== 1) {
     throw new ValidationError(
       `Неподдерживаемая версия формата: ${String(raw.version)}. Ожидается ${PROJECT_VERSION}.`,
     );
   }
+  raw.version = PROJECT_VERSION;
   if (typeof raw.id !== "string" || !raw.id) {
     throw new ValidationError("В проекте отсутствует id");
   }
@@ -1655,6 +1853,19 @@ export function validateProject(raw: unknown): Project {
 
   raw.markerArchive = validateArchive(raw.markerArchive, "Архив удалённых маркеров");
   raw.legend = legend;
+  // Профиль-снапшот (итерация 5): повреждённый снапшот отбрасывается
+  // без краха — проект остаётся рабочим, просто без данных профиля.
+  if (raw.profileSnapshot !== undefined) {
+    try {
+      const parsed = validateSettingProfile(raw.profileSnapshot);
+      raw.profileSnapshot = parsed.profile;
+    } catch {
+      raw.profileSnapshot = undefined;
+    }
+  }
+  if (raw.activeProfileId !== undefined && typeof raw.activeProfileId !== "string") {
+    raw.activeProfileId = undefined;
+  }
 
   return raw as unknown as Project;
 }

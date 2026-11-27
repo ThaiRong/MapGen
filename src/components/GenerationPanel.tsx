@@ -103,11 +103,43 @@ function TerrainSection() {
   const setStatus = useAppStore((s) => s.setStatus);
 
   const [params, setParams] = useState<TerrainParams>(TERRAIN_DEFAULTS);
+  const [terrainKindId, setTerrainKindId] = useState("");
   const [confirmApply, setConfirmApply] = useState<{ spec: GenerationSpec; replace: number } | null>(null);
   const tokenRef = useRef(0);
   const lastSpecJsonRef = useRef<string>("");
 
   const patch = (p: Partial<TerrainParams>) => setParams((prev) => ({ ...prev, ...p }));
+
+  const terrainKinds = project.profileSnapshot?.terrainKinds ?? [];
+  const terrainKind = terrainKinds.find((k) => k.id === terrainKindId) ?? null;
+  const terrainNamingRule = terrainKind?.namingRuleId
+    ? project.profileSnapshot?.namingRules.find((r) => r.id === terrainKind.namingRuleId)
+    : undefined;
+
+  /** Выбор вида местности: подставляем параметры и маппинг по умолчанию. */
+  const selectTerrainKind = (id: string) => {
+    setTerrainKindId(id);
+    const kind = terrainKinds.find((k) => k.id === id);
+    if (!kind) return;
+    const d = kind.defaults;
+    setParams((prev) => ({
+      ...prev,
+      relief: d.relief ?? prev.relief,
+      moisture: d.moisture ?? prev.moisture,
+      temperature: d.temperature ?? prev.temperature,
+      fluidLevel: d.fluidLevel ?? prev.fluidLevel,
+      areaDensity: d.areaDensity ?? prev.areaDensity,
+      lineDensity: d.lineDensity ?? prev.lineDensity,
+      pointDensity: d.pointDensity ?? prev.pointDensity,
+      detail: d.detail ?? prev.detail,
+      fieldScale: d.fieldScale ?? prev.fieldScale,
+      typeArea: kind.typeMapping.area || prev.typeArea,
+      typeLine: kind.typeMapping.line || prev.typeLine,
+      typePoint: kind.typeMapping.point || prev.typePoint,
+      typeLabel: kind.typeMapping.label || prev.typeLabel,
+    }));
+    setStatus(`Вид местности «${kind.name}»: параметры и типы подставлены, можно менять вручную`);
+  };
 
   const typeFor = (shape: LegendShape): string => {
     const chosen =
@@ -164,6 +196,10 @@ function TerrainSection() {
         label: typeFor("label"),
       },
       labels: { enabled: params.labelsEnabled },
+      ...(terrainNamingRule
+        ? { naming: { area: terrainNamingRule, line: terrainNamingRule, point: terrainNamingRule, label: terrainNamingRule } }
+        : null),
+      ...(terrainKind ? { kindName: terrainKind.name } : null),
     };
   };
 
@@ -213,6 +249,19 @@ function TerrainSection() {
 
   return (
     <div className="gen-body">
+      {terrainKinds.length > 0 && (
+        <div className="field">
+          <label>Вид местности (из профиля)</label>
+          <select className="select" value={terrainKindId} onChange={(e) => selectTerrainKind(e.target.value)}>
+            <option value="">— без вида (ручные параметры) —</option>
+            {terrainKinds.map((k) => (
+              <option key={k.id} value={k.id}>
+                {k.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <SeedRow seed={params.seed} onChange={(seed) => patch({ seed })} />
       <Slider label="Рельеф" value={params.relief} onChange={(v) => patch({ relief: v })} />
       <Slider label="Влажность" value={params.moisture} onChange={(v) => patch({ moisture: v })} />
@@ -378,6 +427,40 @@ function StructureSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedPreset]);
 
+  // Вид локации из инспектора маркера предзаполняет параметры панели.
+  const kindPreset = useAppStore((s) => s.structureKindPreset);
+  useEffect(() => {
+    if (!kindPreset) return;
+    const d = kindPreset.defaults;
+    setStructureKindId(kindPreset.id);
+    setParams((prev) => ({
+      ...prev,
+      archetype: kindPreset.archetype,
+      density: d.density ?? prev.density,
+      cellScale: d.cellScale ?? prev.cellScale,
+      irregularity: d.irregularity ?? prev.irregularity,
+      connectivity: d.connectivity ?? prev.connectivity,
+      sizeVariance: d.sizeVariance ?? prev.sizeVariance,
+      pointDensity: d.pointDensity ?? prev.pointDensity,
+      nestedCount: d.nestedCount ?? prev.nestedCount,
+      margin: d.margin ?? prev.margin,
+      detail: d.detail ?? prev.detail,
+      typeArea: kindPreset.typeMapping.area || prev.typeArea,
+      typeLine: kindPreset.typeMapping.line || prev.typeLine,
+      typePoint: kindPreset.typeMapping.point || prev.typePoint,
+      typeLabel: kindPreset.typeMapping.label || prev.typeLabel,
+    }));
+    useAppStore.setState({ structureKindPreset: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kindPreset]);
+
+  const locationKinds = project.profileSnapshot?.locationKinds ?? [];
+  const [structureKindId, setStructureKindId] = useState<string | null>(null);
+  const structureKind = locationKinds.find((k) => k.id === structureKindId) ?? null;
+  const structureNamingRule = structureKind?.namingRuleId
+    ? project.profileSnapshot?.namingRules.find((r) => r.id === structureKind.namingRuleId)
+    : undefined;
+
   // Область по умолчанию захватывается из вида ОДИН раз на карту и
   // дальше фиксирована: генерация не зависит от zoom/pan, пока
   // пользователь явно не задаст рамку заново. При смене карты
@@ -451,6 +534,19 @@ function StructureSection() {
         label: typeFor("label"),
       },
       labels: { enabled: params.labelsEnabled },
+      ...(structureNamingRule
+        ? {
+            naming: {
+              area: structureNamingRule,
+              line: structureNamingRule,
+              point: structureNamingRule,
+              label: structureNamingRule,
+              location: structureNamingRule,
+            },
+          }
+        : null),
+      ...(structureKind?.nestedKindId ? { nestedKindId: structureKind.nestedKindId } : null),
+      ...(structureKind ? { kindName: structureKind.name } : null),
     };
   };
 
@@ -505,6 +601,47 @@ function StructureSection() {
 
   return (
     <div className="gen-body">
+      {locationKinds.length > 0 && (
+        <div className="field">
+          <label>Вид локации (из профиля)</label>
+          <select
+            className="select"
+            value={structureKindId ?? ""}
+            onChange={(e) => {
+              const id = e.target.value;
+              setStructureKindId(id || null);
+              const kind = locationKinds.find((k) => k.id === id);
+              if (kind) {
+                const d = kind.defaults;
+                setParams((prev) => ({
+                  ...prev,
+                  archetype: kind.archetype,
+                  density: d.density ?? prev.density,
+                  cellScale: d.cellScale ?? prev.cellScale,
+                  irregularity: d.irregularity ?? prev.irregularity,
+                  connectivity: d.connectivity ?? prev.connectivity,
+                  sizeVariance: d.sizeVariance ?? prev.sizeVariance,
+                  pointDensity: d.pointDensity ?? prev.pointDensity,
+                  nestedCount: d.nestedCount ?? prev.nestedCount,
+                  margin: d.margin ?? prev.margin,
+                  detail: d.detail ?? prev.detail,
+                  typeArea: kind.typeMapping.area || prev.typeArea,
+                  typeLine: kind.typeMapping.line || prev.typeLine,
+                  typePoint: kind.typeMapping.point || prev.typePoint,
+                  typeLabel: kind.typeMapping.label || prev.typeLabel,
+                }));
+              }
+            }}
+          >
+            <option value="">— без вида (ручные параметры) —</option>
+            {locationKinds.map((k) => (
+              <option key={k.id} value={k.id}>
+                {k.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="field">
         <label>Архетип (структурное имя, без сеттинга)</label>
         <select

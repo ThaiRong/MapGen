@@ -2,7 +2,7 @@ export type MapId = string;
 export type EntityId = string;
 
 export const PROJECT_FORMAT = "mapgen-project";
-export const PROJECT_VERSION = 1;
+export const PROJECT_VERSION = 2;
 
 export interface Project {
   format: typeof PROJECT_FORMAT;
@@ -14,6 +14,10 @@ export interface Project {
   markerArchive: ArchivedMarker[];
   /** Типы легенды на уровне проекта (итерация 2). */
   legend: LegendType[];
+  /** Активный профиль сеттинга (итерация 5). */
+  activeProfileId?: string;
+  /** Встроенная копия применённого профиля — самодостаточность проекта. */
+  profileSnapshot?: SettingProfile;
   createdAt: string;
   updatedAt: string;
 }
@@ -71,6 +75,8 @@ export interface LocationLinkEntity {
   /** Происхождение: создан вручную или генерацией структуры (итерация 4). */
   origin?: PrimitiveOrigin;
   generationId?: string;
+  /** Вид локации из профиля, необязательно (итерация 5). */
+  kindId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -101,6 +107,10 @@ export interface GenerationSpec {
   bounds: { x: number; y: number; width: number; height: number };
   typeMapping: { area: string; line: string; point: string; label: string };
   labels: { enabled: boolean };
+  /** Правила именования, встроенные в спеку для воспроизводимости (итерация 5). */
+  naming?: SpecNaming;
+  /** Имя вида местности из профиля — только для описаний, не влияет на расчёт. */
+  kindName?: string;
 }
 
 export type MapGeneration =
@@ -141,6 +151,74 @@ export interface StructureSpec {
   bounds: Rect;
   typeMapping: { area: string; line: string; point: string; label: string };
   labels: { enabled: boolean };
+  /** Правила именования, встроенные в спеку для воспроизводимости (итерация 5). */
+  naming?: SpecNaming;
+  /** Вид вложенных локаций из профиля (итерация 5). */
+  nestedKindId?: string;
+  /** Имя вида локации из профиля — только для описаний, не влияет на расчёт. */
+  kindName?: string;
+}
+
+/** Правила именования, вшитые в спеку генерации. */
+export interface SpecNaming {
+  area?: NamingRule;
+  line?: NamingRule;
+  point?: NamingRule;
+  label?: NamingRule;
+  location?: NamingRule;
+}
+
+/* ---------- Профили сеттинга (итерация 5) ---------- */
+
+export interface ProfileCategory {
+  id: string;
+  name: string;
+  order: number;
+}
+
+export interface NamingRule {
+  id: string;
+  name: string;
+  appliesTo: "area" | "line" | "point" | "label" | "location";
+  /** Шаблон вида "{A} {B}" — ключи подставляются из списков. */
+  pattern: string;
+  /** Списки слов: ключ шаблона → варианты. Всё приходит из данных пользователя. */
+  lists: Record<string, string[]>;
+}
+
+export interface LocationKind {
+  id: string;
+  name: string;
+  categoryId?: string;
+  archetype: StructureArchetype;
+  defaults: Partial<StructureSpec>;
+  typeMapping: { area: string; line: string; point: string; label: string };
+  namingRuleId?: string;
+  nestedKindId?: string;
+}
+
+export interface TerrainKind {
+  id: string;
+  name: string;
+  categoryId?: string;
+  defaults: Partial<GenerationSpec>;
+  typeMapping: { area: string; line: string; point: string; label: string };
+  namingRuleId?: string;
+}
+
+/** Профиль сеттинга — чистые данные, без семантики в коде ядра. */
+export interface SettingProfile {
+  id: string;
+  name: string;
+  description: string;
+  version: number;
+  categories: ProfileCategory[];
+  legendTypes: LegendType[];
+  namingRules: NamingRule[];
+  locationKinds: LocationKind[];
+  terrainKinds: TerrainKind[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface StructureNested {

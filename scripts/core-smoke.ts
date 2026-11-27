@@ -17,9 +17,12 @@ import {
   deletePrimitive,
   deletePrimitives,
   applyGenerationToMap,
+  applyProfileToProject,
   applyStructureToMap,
   countReplaceableGenerated,
   analyzeStructureRegen,
+  detachProfile,
+  previewProfileApplication,
   fallbackTypeForKind,
   findPrimitive,
   moveMarker,
@@ -49,6 +52,14 @@ import {
 import { generate } from "../src/core/generation/generate";
 import { generateStructure } from "../src/core/generation/structure/generateStructure";
 import { deriveSeed } from "../src/core/generation/structure/rng";
+import {
+  createEmptyProfile,
+  nameFor,
+  namingRng,
+  nestedKindChain,
+  renderName,
+  validateSettingProfile,
+} from "../src/core/profiles";
 import { buildTree, getPathToRoot, getDescendantIds } from "../src/core/tree";
 import {
   canRedo,
@@ -82,7 +93,12 @@ function assert(cond: boolean, label: string) {
 // 1. Создание проекта
 let project = createProject("Тест");
 assert(project.format === "mapgen-project", "формат проекта");
-assert(project.version === 1, "версия формата");
+assert(project.version === 2, "версия формата (v2, профили)");
+assert(project.activeProfileId === undefined && project.profileSnapshot === undefined, "проект создаётся без профиля");
+const legacyV1 = deserializeProject(
+  JSON.stringify({ ...JSON.parse(serializeProject(project)), version: 1 }),
+);
+assert(legacyV1.version === 2 && !!legacyV1.maps[legacyV1.rootMapId], "миграция: проект v1 открывается и нормализуется к v2");
 const root = project.maps[project.rootMapId];
 assert(root.name === ROOT_MAP_NAME, "корневая карта называется «Глобальная карта»");
 assert(root.parentId === null, "у корня нет родителя");
@@ -1122,5 +1138,158 @@ const legacy = JSON.parse(text2) as Record<string, unknown>;
 delete legacy.markerArchive;
 const legacyParsed = deserializeProject(JSON.stringify(legacy));
 assert(legacyParsed.markerArchive.length === 0, "файл v1 без архива загружается как пустой архив");
+
+// 45. Профили: правила именования — детерминизм и фолбэк
+const ruleSample: import("../src/core/types").NamingRule = {
+  id: "rule-1",
+  name: "Правило",
+  appliesTo: "area",
+  pattern: "{A} {B}",
+  lists: { A: ["Тёмный", "Старый", "Первый"], B: ["Холм", "Брод", "Свод"] },
+};
+const r1 = renderName(ruleSample, namingRng("зерно", "area", 1));
+const r2 = renderName(ruleSample, namingRng("зерно", "area", 1));
+const r3 = renderName(ruleSample, namingRng("зерно", "area", 2));
+assert(r1 !== null && r1 === r2, "имена детерминированы: тот же seed — то же имя");
+assert(r3 !== null, "правило рендерит имя");
+assert(renderName(undefined, namingRng("з", "a", 1)) === null, "нет правила — фолбэк на счётчик");
+assert(
+  renderName({ ...ruleSample, lists: { A: [] } }, namingRng("з", "a", 1)) === null,
+  "пустой список — фолбэк на счётчик",
+);
+assert(
+  nameFor(undefined, "area", "з", 1, () => "Область 7") === "Область 7",
+  "без правила именования — нейтральный счётчик",
+);
+
+// 46. Профиль: валидация битых ссылок и циклы не роняют загрузку
+const brokenProfile = validateSettingProfile({
+  id: "p1",
+  name: "Профиль",
+  version: 1,
+  categories: [{ id: "c1", name: "Кат", order: 0 }],
+  legendTypes: [
+    { id: "t1", name: "Т1", shape: "line", color: "#fff", opacity: 1, strokeWidth: 2, strokeStyle: "solid", visible: true, isBuiltin: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: "t1", name: "Дубль", shape: "area", color: "#fff", opacity: 1, strokeWidth: 2, strokeStyle: "solid", visible: true, isBuiltin: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  ],
+  namingRules: [{ id: "n1", name: "П", appliesTo: "location", pattern: "{A}", lists: { A: ["Узел"] } }],
+  locationKinds: [
+    { id: "k1", name: "Вид А", archetype: "cellular", defaults: {}, typeMapping: { area: "t1", line: "t1", point: "t1", label: "t1" }, namingRuleId: "n1", nestedKindId: "k2" },
+    { id: "k2", name: "Вид Б", archetype: "radial", defaults: {}, typeMapping: { area: "t1", line: "t1", point: "t1", label: "t1" }, nestedKindId: "k1" },
+    { id: "k3", name: "Вид В", archetype: "open", defaults: {}, typeMapping: { area: "missing", line: "t1", point: "t1", label: "t1" } },
+  ],
+  terrainKinds: [],
+  createdAt: 1,
+  updatedAt: 1,
+});
+assert(brokenProfile.warnings.length >= 3, "битые ссылки и дубли дают предупреждения, не краш");
+assert(
+  brokenProfile.profile.locationKinds.length === 3,
+  "виды загружены с предупреждениями о битых ссылках",
+);
+assert(
+  brokenProfile.profile.locationKinds.find((k) => k.id === "k1")?.nestedKindId === "k2",
+  "ссылка вперёд (nestedKindId на поздний вид) восстановлена вторым проходом",
+);
+const chain = nestedKindChain(brokenProfile.profile, "k1");
+assert(chain.length <= 8 && chain.length >= 2, "цикл в nestedKindId обрывается лимитом глубины");
+
+// 47. Применение профиля: типы добавляются/обновляются, ручные и locked не тронуты
+let pp = createProject("Профиль-применение");
+const applyLineType = pp.legend.find((t) => t.shape === "line")!;
+const manualP = createLinePrimitive(pp.maps[pp.rootMapId], applyLineType.id, [{ x: 0, y: 0 }, { x: 9, y: 9 }]);
+pp = addPrimitive(pp, pp.rootMapId, manualP);
+const genP = createPointPrimitive(pp.maps[pp.rootMapId], pp.legend.find((t) => t.shape === "point")!.id, 3, 3);
+pp = addPrimitive(pp, pp.rootMapId, genP);
+pp = updatePrimitive(pp, pp.rootMapId, genP.id, { locked: true });
+const profileForApply = createEmptyProfile("Мир пользователя");
+profileForApply.legendTypes.push(
+  { ...applyLineType, id: applyLineType.id, name: "Связи мира", color: "#123456", strokeWidth: 5, isBuiltin: false },
+  {
+    id: "ptype-area-1",
+    name: "Участок",
+    category: "Зоны",
+    shape: "area",
+    color: "#654321",
+    opacity: 0.5,
+    strokeWidth: 3,
+    strokeStyle: "dashed",
+    visible: true,
+    isBuiltin: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+);
+const preview = previewProfileApplication(pp, profileForApply);
+assert(preview.conflicts.length === 0 && preview.added === 1 && preview.updated === 1, "предпросмотр применения: добавлено/обновлено без конфликтов");
+const applied = applyProfileToProject(pp, profileForApply);
+pp = applied.project;
+assert(pp.activeProfileId === profileForApply.id && !!pp.profileSnapshot, "activeProfileId и снапшот записаны");
+assert(pp.legend.some((t) => t.id === "ptype-area-1"), "тип профиля добавлен в легенду");
+assert(pp.legend.find((t) => t.id === applyLineType.id)?.strokeWidth === 5, "стиль существующего типа обновлён по id");
+assert(
+  pp.legend.find((t) => t.id === applyLineType.id)?.isBuiltin === true,
+  "базовый тип остался базовым после обновления стиля",
+);
+assert(
+  pp.maps[pp.rootMapId].primitives.some((p) => p.id === manualP.id && p.origin === "manual") &&
+    pp.maps[pp.rootMapId].primitives.some((p) => p.id === genP.id && p.locked),
+  "ручные и заблокированные примитивы не тронуты применением профиля",
+);
+// Конфликт shape блокирует применение
+const conflictProfile = createEmptyProfile("Конфликт");
+conflictProfile.legendTypes.push({ ...applyLineType, id: applyLineType.id, shape: "area", isBuiltin: false });
+const conflictPreview = previewProfileApplication(pp, conflictProfile);
+assert(conflictPreview.conflicts.length === 1, "смена shape используемого типа — конфликт");
+try {
+  applyProfileToProject(pp, conflictProfile);
+  assert(false, "применение с конфликтом должно бросить ошибку");
+} catch (e) {
+  assert(e instanceof ValidationError, "конфликт shape блокирует применение с объяснением");
+}
+
+// 48. Самодостаточность: имена из снапшота воспроизводятся без библиотеки
+const namingRuleLoc: import("../src/core/types").NamingRule = {
+  id: "nr-loc",
+  name: "Локации",
+  appliesTo: "location",
+  pattern: "{A}-{B}",
+  lists: { A: ["Север", "Юг"], B: ["Пост", "Вход"] },
+};
+const specWithNaming = {
+  ...stSpecBase,
+  seed: "снапшот-1",
+  nestedCount: 2,
+  naming: { area: ruleSample, line: ruleSample, point: ruleSample, label: ruleSample, location: namingRuleLoc },
+} as Parameters<typeof generateStructure>[0];
+const appliedNamed = applyStructureToMap(ps, ps.rootMapId, specWithNaming);
+const names1 = appliedNamed.project.maps[ps.rootMapId].entities.map((e) => e.label).sort();
+const names1p = appliedNamed.project.maps[ps.rootMapId].primitives.map((p) => p.name).sort();
+const reloadedAlone = deserializeSave(serializeSave(appliedNamed.project, afterRewrite)).project;
+const regenAlone = applyStructureToMap(reloadedAlone, reloadedAlone.rootMapId, specWithNaming);
+const names2 = regenAlone.project.maps[reloadedAlone.rootMapId].entities.map((e) => e.label).sort();
+const names2p = regenAlone.project.maps[reloadedAlone.rootMapId].primitives.map((p) => p.name).sort();
+assert(JSON.stringify(names1) === JSON.stringify(names2), "имена локаций воспроизводятся из спеки после сохранения/загрузки");
+assert(JSON.stringify(names1p) === JSON.stringify(names2p), "имена примитивов воспроизводятся из спеки после сохранения/загрузки");
+assert(names1.some((n) => /-/.test(n)), "имена локаций по шаблону профиля, не счётчики");
+
+// 49. Переименованный сгенерированный примитив становится ручным
+let pr2 = appliedNamed.project;
+const genPrim = pr2.maps[ps.rootMapId].primitives.find((p) => p.origin === "generated")!;
+pr2 = updatePrimitive(pr2, ps.rootMapId, genPrim.id, { name: "Моё имя" });
+const renamedPrim = pr2.maps[ps.rootMapId].primitives.find((p) => p.id === genPrim.id)!;
+assert(renamedPrim.origin === "manual", "переименованный сгенерированный примитив стал ручным");
+const regenAfterRename = applyStructureToMap(pr2, ps.rootMapId, specWithNaming);
+assert(
+  regenAfterRename.project.maps[ps.rootMapId].primitives.some((p) => p.id === genPrim.id && p.name === "Моё имя"),
+  "ручное имя пережило перегенерацию",
+);
+
+// 50. Отключение профиля: типы и примитивы целы
+const detached = detachProfile(pp, true);
+assert(detached.activeProfileId === undefined && !!detached.profileSnapshot, "отключение: activeProfileId снят, снапшот сохранён по выбору");
+assert(detached.legend.length === pp.legend.length, "отключение: типы легенды сохранены");
+const detachedNoSnap = detachProfile(pp, false);
+assert(detachedNoSnap.profileSnapshot === undefined, "отключение без снапшота очищает его");
 
 console.log(`\nВсе ${passed} проверок пройдены`);

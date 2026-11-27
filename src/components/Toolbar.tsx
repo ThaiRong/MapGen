@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useAppStore, type Tool } from "../state/store";
 import ArchiveDialog from "./ArchiveDialog";
 import PrimitivesDialog from "./PrimitivesDialog";
+import ProfilesDialog from "./ProfilesDialog";
 import ConfirmDialog from "./ConfirmDialog";
 
 const TOOLS: { id: Tool; label: string; title: string }[] = [
@@ -31,6 +32,7 @@ export default function Toolbar() {
   const [confirmNew, setConfirmNew] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [primitivesOpen, setPrimitivesOpen] = useState(false);
+  const [profilesOpen, setProfilesOpen] = useState(false);
 
   const store = useAppStore.getState();
 
@@ -85,6 +87,9 @@ export default function Toolbar() {
         >
           История
         </button>
+        <button onClick={() => setProfilesOpen(true)} title="Библиотека и редактор профилей сеттинга">
+          Профили
+        </button>
 
         <input
           className="project-title"
@@ -126,6 +131,7 @@ export default function Toolbar() {
       />
       <ArchiveDialog open={archiveOpen} onClose={() => setArchiveOpen(false)} />
       <PrimitivesDialog open={primitivesOpen} onClose={() => setPrimitivesOpen(false)} />
+      <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />
     </div>
   );
 }

@@ -209,11 +209,15 @@ function MarkerInspector() {
   const openMap = useAppStore((s) => s.openMap);
   const openLocationGeneration = useAppStore((s) => s.openLocationGeneration);
   const deleteSelectedMarker = useAppStore((s) => s.deleteSelectedMarker);
+  const setMarkerKindById = useAppStore((s) => s.setMarkerKindById);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const labelRef = useRef<HTMLInputElement>(null);
 
   if (!marker) return null;
   const target = project.maps[marker.targetMapId];
+  const profile = project.profileSnapshot;
+  const profileKinds = profile?.locationKinds ?? [];
+  const profileName = profile?.name ?? "";
 
   return (
     <>
@@ -235,6 +239,26 @@ function MarkerInspector() {
         <label>Связанная карта</label>
         <div className="value">{target ? target.name : "— (карта не найдена)"}</div>
       </div>
+      {profileKinds.length > 0 && (
+        <div className="field">
+          <label>Вид локации (из профиля «{profileName}»)</label>
+          <select
+            className="select"
+            value={marker.kindId ?? ""}
+            onChange={(e) => setMarkerKindById(activeMapId, marker.id, e.target.value || undefined)}
+          >
+            <option value="">— без вида —</option>
+            {profileKinds.map((k) => (
+              <option key={k.id} value={k.id}>
+                {k.name}
+              </option>
+            ))}
+          </select>
+          <div className="hint">
+            «Сгенерировать локацию» использует архетип, параметры, типы и правила имён выбранного вида.
+          </div>
+        </div>
+      )}
       <div className="field">
         <label>ID маркера</label>
         <div className="value">{marker.id}</div>
