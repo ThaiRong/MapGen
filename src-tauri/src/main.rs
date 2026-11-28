@@ -14,6 +14,8 @@ fn main() {
             commands::profile_read,
             commands::profile_write,
             commands::profile_delete,
+            commands::toggle_player_window,
+            commands::player_window_open,
         ])
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {

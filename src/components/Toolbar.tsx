@@ -24,6 +24,7 @@ export default function Toolbar() {
     (s) => s.history.position < s.history.entries.length - 1,
   );
   const archiveCount = useAppStore((s) => s.project.markerArchive.length);
+  const playerWindowOpen = useAppStore((s) => s.playerWindowOpen);
   const primitiveCount = useAppStore(
     (s) => s.project.maps[s.activeMapId]?.primitives.length ?? 0,
   );
@@ -90,6 +91,13 @@ export default function Toolbar() {
         </button>
         <button onClick={() => setProfilesOpen(true)} title="Библиотека и редактор профилей сеттинга">
           Профили
+        </button>
+        <button
+          className={playerWindowOpen ? "active" : undefined}
+          onClick={() => void store.togglePlayerWindow()}
+          title="Открыть/закрыть окно игрока (только просмотр раскрытого)"
+        >
+          Окно игрока
         </button>
 
         <input

@@ -43,6 +43,7 @@ import {
   setMapScale,
   setMapView,
   setMapFog,
+  setMarkerPlayerVisible,
   updateLegendType,
   updatePrimitive,
   validateProject,
@@ -1536,5 +1537,27 @@ assert(
 // Туман на вложенных картах работает так же
 const projChild = pproj.maps[projLoc.mapId];
 assert(projectForPlayer(projChild).primitives.length === 0, "проекция вложенной карты: пустая карта — пустая проекция");
+
+// 54. Окно игрока (итерация 8): флаг «показывать игрокам» у маркера
+pproj = setMarkerPlayerVisible(pproj, pproj.rootMapId, projLoc.entityId, false);
+projection = projectForPlayer(pproj.maps[pproj.rootMapId]);
+assert(projection.markers.length === 0, "маркер с флагом «не показывать» не попадает в проекцию при раскрытом тумане");
+pproj = setMarkerPlayerVisible(pproj, pproj.rootMapId, projLoc.entityId, true);
+projection = projectForPlayer(pproj.maps[pproj.rootMapId]);
+assert(projection.markers.length === 1, "повторное включение возвращает маркер в проекцию");
+assert(
+  pproj.maps[pproj.rootMapId].entities.find((e) => e.id === projLoc.entityId)?.playerVisible !== false,
+  "флаг playerVisible по умолчанию true (undefined = показывать)",
+);
+// Проекция не содержит служебных данных: только id/имя/геометрия/стили
+const feedSample = {
+  projection: projectForPlayer(pproj.maps[pproj.rootMapId]),
+};
+assert(
+  feedSample.projection.primitives.every((p) => !("note" in p) || !p.note) &&
+    !("fog" in feedSample.projection) &&
+    !("generation" in feedSample.projection),
+  "проекция не несёт заметок, тумана и спек генерации",
+);
 
 console.log(`\nВсе ${passed} проверок пройдены`);

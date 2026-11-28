@@ -473,6 +473,27 @@ export default function CanvasView() {
           }
           ctx.restore();
         }
+
+        // Пометка «скрыто от игрока» (итерация 8.4): объект остаётся
+        // у мастера, но не передаётся в окно игрока.
+        if (p.playerVisible === false) {
+          const anchor =
+            p.kind === "point" || p.kind === "label"
+              ? { x: p.x, y: p.y }
+              : {
+                  x: p.points.reduce((sum, pt) => sum + pt.x, 0) / p.points.length,
+                  y: p.points.reduce((sum, pt) => sum + pt.y, 0) / p.points.length,
+                };
+          const c = toS(anchor);
+          ctx.save();
+          ctx.strokeStyle = "#e05c5c";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 12, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
       }
 
       // Ручка поворота — единичный выбор линии/области, инструмент «Выбор».
@@ -524,6 +545,18 @@ export default function CanvasView() {
         ctx.textAlign = "center";
         ctx.fillStyle = "#d7d9e0";
         ctx.fillText(e.label, s.x, s.y - MARKER_RADIUS - 6);
+
+        // Пометка «скрыто от игрока» — красное пунктирное кольцо (итерация 8.4).
+        if (e.playerVisible === false) {
+          ctx.save();
+          ctx.strokeStyle = "#e05c5c";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, MARKER_RADIUS + 5, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
       }
 
       // --- Туман войны: оверлей мастера (деликатный, контекст виден) ---

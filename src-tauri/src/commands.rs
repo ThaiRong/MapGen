@@ -1,9 +1,34 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const AUTOSAVE_NAME: &str = "autosave.mapkg";
+const PLAYER_WINDOW_LABEL: &str = "player";
+
+/// Окно игрока (итерация 8): отдельное окно с тем же фронтендом
+/// в режиме ?player=1. Переключатель: открыть/закрыть.
+#[tauri::command]
+pub fn toggle_player_window(app: AppHandle) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window(PLAYER_WINDOW_LABEL) {
+        window.close().map_err(|e| format!("Не удалось закрыть окно игрока: {e}"))?;
+        return Ok(false);
+    }
+    let url = WebviewUrl::App("index.html?player=1".into());
+    WebviewWindowBuilder::new(&app, PLAYER_WINDOW_LABEL, url)
+        .title("MapGen — окно игрока")
+        .inner_size(1024.0, 700.0)
+        .min_inner_size(640.0, 420.0)
+        .build()
+        .map_err(|e| format!("Не удалось открыть окно игрока: {e}"))?;
+    Ok(true)
+}
+
+/// Открыто ли окно игрока (для индикации в интерфейсе мастера).
+#[tauri::command]
+pub fn player_window_open(app: AppHandle) -> bool {
+    app.get_webview_window(PLAYER_WINDOW_LABEL).is_some()
+}
 
 /* ---------- Библиотека профилей: ~/.mapgen/profiles ---------- */
 

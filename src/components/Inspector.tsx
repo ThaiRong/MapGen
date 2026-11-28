@@ -210,6 +210,7 @@ function MarkerInspector() {
   const openLocationGeneration = useAppStore((s) => s.openLocationGeneration);
   const deleteSelectedMarker = useAppStore((s) => s.deleteSelectedMarker);
   const setMarkerKindById = useAppStore((s) => s.setMarkerKindById);
+  const setMarkerPlayerVisibleById = useAppStore((s) => s.setMarkerPlayerVisibleById);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const labelRef = useRef<HTMLInputElement>(null);
 
@@ -264,8 +265,20 @@ function MarkerInspector() {
         <div className="value">{marker.id}</div>
       </div>
       <div className="field">
-        <label>Координаты на карте «{project.maps[activeMapId]?.name ?? ""}»</label>
-        <div className="row">
+        <label>
+          <input
+            type="checkbox"
+            checked={marker.playerVisible !== false}
+            onChange={(e) => setMarkerPlayerVisibleById(activeMapId, marker.id, e.target.checked)}
+          />{" "}
+          Показывать игрокам
+        </label>
+        {marker.playerVisible === false && (
+          <div className="hint">Скрыт от игроков: в окне игрока не передаётся вовсе.</div>
+        )}
+      </div>
+      <div className="field">
+        <label>Координаты на карте «{project.maps[activeMapId]?.name ?? ""}»</label><div className="row">
           <input
             key={`${marker.id}:x:${marker.x}`}
             type="number"
@@ -514,6 +527,17 @@ function PrimitiveInspector() {
           />{" "}
           Заблокирован (нельзя двигать и удалять)
         </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={primitive.playerVisible !== false}
+            onChange={(e) => updatePrimitiveProps(activeMapId, primitive.id, { playerVisible: e.target.checked })}
+          />{" "}
+          Показывать игрокам
+        </label>
+        {primitive.playerVisible === false && (
+          <div className="hint">Скрыт от игроков: в окне игрока не передаётся вовсе.</div>
+        )}
       </div>
 
       <div className="buttons">

@@ -1,5 +1,9 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
+import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { PLAYER_FEED_EVENT, type PlayerFeedPayload } from "../core/playerFeed";
+import { projectForPlayer } from "../core/projection";
 import {
   addLegendType,
   addLocation,
@@ -41,6 +45,7 @@ import {
   setMapScale,
   setMapView,
   setMarkerKind,
+  setMarkerPlayerVisible,
   updateLegendType,
   updatePrimitive,
   ValidationError,
@@ -323,6 +328,7 @@ export interface AppState {
   structureKindPreset: LocationKind | null;
   openLocationGeneration: (targetMapId: MapId, markerId: EntityId) => void;
   setMarkerKindById: (mapId: MapId, entityId: EntityId, kindId: string | undefined) => void;
+  setMarkerPlayerVisibleById: (mapId: MapId, entityId: EntityId, visible: boolean) => void;
 
   /* Профили сеттинга (итерация 5) */
   profilesList: ProfileMeta[];
@@ -363,6 +369,10 @@ export interface AppState {
   fogSetAll: (reveal: boolean) => void;
   fogInvert: () => void;
   fogHiddenCountForConfirm: (reveal: boolean) => number;
+
+  /* Окно игрока (итерация 8) */
+  playerWindowOpen: boolean;
+  togglePlayerWindow: () => Promise<void>;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -541,6 +551,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     fogCategories: ["landscape", "topography", "objects"],
     fogOverlayVisible: true,
     fogDraft: null,
+    playerWindowOpen: false,
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -978,6 +989,39 @@ export const useAppStore = create<AppState>()((set, get) => {
       }
       // «Раскрыть всё» меняет скрытые тайлы; «скрыть всё» — видимые.
       return reveal ? hidden : totalTiles * fogCategories.length - hidden;
+    },
+
+    togglePlayerWindow: async () => {
+      try {
+        const open = await invoke<boolean>("toggle_player_window");
+        set({
+          playerWindowOpen: open,
+          status: open
+            ? "Окно игрока открыто — перетащите его на второй монитор"
+            : "Окно игрока закрыто",
+        });
+        if (open) emitPlayerFeed(true);
+      } catch (e) {
+        set({
+          status: e instanceof Error ? `Окно игрока: ${e.message}` : "Не удалось переключить окно игрока",
+        });
+      }
+    },
+
+    setMarkerPlayerVisibleById: (mapId, entityId, visible) => {
+      const { project } = get();
+      const marker = project.maps[mapId]?.entities.find((e) => e.id === entityId);
+      if (!marker) return;
+      apply(
+        setMarkerPlayerVisible(project, mapId, entityId, visible),
+        {
+          operationType: "entity.playerVisible",
+          description: `Маркер «${marker.label}» ${visible ? "показывается" : "скрыт"} игрокам`,
+          mapId,
+          entityId,
+        },
+        visible ? `Маркер «${marker.label}» виден игрокам` : `Маркер «${marker.label}» скрыт от игроков`,
+      );
     },
 
     refreshProfiles: async () => {
@@ -1468,6 +1512,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         description = `Примитив «${current.name}» ${patch.visible ? "показан" : "скрыт"}`;
       } else if (patch.locked !== undefined) {
         description = `Примитив «${current.name}» ${patch.locked ? "заблокирован" : "разблокирован"}`;
+      } else if (patch.playerVisible !== undefined) {
+        description = `Примитив «${current.name}» ${patch.playerVisible ? "показывается" : "скрыт"} игрокам`;
       } else if (patch.text !== undefined) {
         description = `Подпись «${displayNameOf(current)}»: текст изменён`;
       } else {
@@ -2028,6 +2074,54 @@ useAppStore.subscribe((state, prev) => {
       useAppStore.setState({ status: "Ошибка автосохранения" });
     });
   }, 800);
+});
+
+/* ---- Окно игрока: троттлированная отправка проекции (итерация 8.5) ---- */
+
+let playerFeedTimer: ReturnType<typeof setTimeout> | null = null;
+
+function emitPlayerFeed(immediate = false): void {
+  const doEmit = () => {
+    const { project, activeMapId, generationViewport } = useAppStore.getState();
+    const map = project.maps[activeMapId];
+    if (!map) return;
+    // Проекция фильтруется ЗДЕСЬ, в основном процессе: в окно игрока
+    // не уходит ничего скрытого — ни геометрия, ни имена, ни заметки.
+    const payload: PlayerFeedPayload = {
+      mapId: map.id,
+      mapName: map.name,
+      projection: projectForPlayer(map),
+      legend: project.legend,
+      camera: generationViewport
+        ? {
+            centerX: generationViewport.centerX,
+            centerY: generationViewport.centerY,
+            zoom: generationViewport.zoom,
+          }
+        : { centerX: 0, centerY: 0, zoom: 1 },
+    };
+    void emit(PLAYER_FEED_EVENT, payload).catch(() => {
+      // Окно закрыто или нет среды Tauri — тихо игнорируем.
+    });
+  };
+  if (immediate) {
+    doEmit();
+    return;
+  }
+  if (playerFeedTimer) clearTimeout(playerFeedTimer);
+  playerFeedTimer = setTimeout(doEmit, 200);
+}
+
+useAppStore.subscribe((state, prev) => {
+  if (!state.playerWindowOpen) return;
+  if (
+    state.project === prev.project &&
+    state.activeMapId === prev.activeMapId &&
+    state.generationViewport === prev.generationViewport
+  ) {
+    return;
+  }
+  emitPlayerFeed();
 });
 
 export function useSelectedMarker(): LocationLinkEntity | null {

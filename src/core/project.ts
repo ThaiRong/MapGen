@@ -207,6 +207,34 @@ export function setMarkerKind(
   });
 }
 
+/**
+ * Флаг «показывать игрокам» у маркера (итерация 8). Скрытый от игрока
+ * маркер не попадает в проекцию окна игрока, но остаётся у мастера.
+ */
+export function setMarkerPlayerVisible(
+  project: Project,
+  mapId: MapId,
+  entityId: EntityId,
+  visible: boolean,
+): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  const ts = now();
+  return touch({
+    ...project,
+    maps: {
+      ...project.maps,
+      [mapId]: {
+        ...map,
+        updatedAt: ts,
+        entities: map.entities.map((e) =>
+          e.id === entityId ? { ...e, playerVisible: visible ? undefined : false, updatedAt: ts } : e,
+        ),
+      },
+    },
+  });
+}
+
 export function moveMarker(
   project: Project,
   mapId: MapId,
