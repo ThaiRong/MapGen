@@ -53,6 +53,9 @@ import { generate } from "../src/core/generation/generate";
 import { generateStructure } from "../src/core/generation/structure/generateStructure";
 import { polygonsOverlap } from "../src/core/generation/structure/partition";
 import { deriveSeed } from "../src/core/generation/structure/rng";
+import { sanitizeModelOutput } from "../src/core/model/validate";
+import { OllamaAdapter } from "../src/core/model/ollama";
+import { ModelError } from "../src/core/model/adapter";
 import {
   createEmptyProfile,
   nameFor,
@@ -1307,5 +1310,104 @@ assert(detached.activeProfileId === undefined && !!detached.profileSnapshot, "о
 assert(detached.legend.length === pp.legend.length, "отключение: типы легенды сохранены");
 const detachedNoSnap = detachProfile(pp, false);
 assert(detachedNoSnap.profileSnapshot === undefined, "отключение без снапшота очищает его");
+
+// 51. Локальная модель (итерация 6): валидация вывода и фолбэк адаптера
+const mTerrain = sanitizeModelOutput('{"relief": 0.8, "moisture": 0.4, "temperature": -2, "fieldScale": 9}', "terrain");
+assert(
+  (mTerrain.spec as { relief: number }).relief === 0.8 && (mTerrain.spec as { temperature: number }).temperature === -1,
+  "санитизация: значения приводятся к диапазонам спеки",
+);
+assert((mTerrain.spec as { fieldScale: number }).fieldScale === 3, "fieldScale ограничен 0.5..3");
+assert(mTerrain.warnings.length >= 2, "выход за диапазоны даёт предупреждения");
+const mFence = sanitizeModelOutput('Вот параметры:\n```json\n{"archetype": "radial", "density": 0.7, "nestedCount": 99}\n```', "structure");
+assert(
+  (mFence.spec as { archetype: string }).archetype === "radial" &&
+    (mFence.spec as { density: number }).density === 0.7 &&
+    (mFence.spec as { nestedCount: number }).nestedCount === 8,
+  "санитизация: JSON в блоке ``` и nestedCount к [0,8]",
+);
+const mBadArch = sanitizeModelOutput('{"archetype": "tavern", "density": 0.5}', "structure");
+assert((mBadArch.spec as Record<string, unknown>).archetype === undefined, "неизвестный архетип отброшен с предупреждением");
+assert(mBadArch.warnings.some((w) => w.includes("archetype")), "предупреждение о неизвестном архетипе");
+try {
+  sanitizeModelOutput('{"foo": "bar"}', "terrain");
+  assert(false, "ответ без параметров должен быть отклонён");
+} catch (e) {
+  assert(e instanceof ModelError && e.code === "invalid-response", "невалидный ответ отклоняется понятной ошибкой");
+}
+try {
+  sanitizeModelOutput("не json вовсе", "structure");
+  assert(false, "не-JSON ответ должен быть отклонён");
+} catch (e) {
+  assert(e instanceof ModelError, "не-JSON ответ отклоняется");
+}
+const mOnce = sanitizeModelOutput('{"relief": 0.5, "density": 0.6}', "structure");
+const mTwice = sanitizeModelOutput('{"relief": 0.5, "density": 0.6}', "structure");
+assert(JSON.stringify(mOnce) === JSON.stringify(mTwice), "санитизация детерминирована");
+
+// Адаптер с инъецированным fetch: недоступность, список моделей, ответ, HTTP-ошибка
+const fakeSettings = { enabled: true, host: "http://127.0.0.1:11434", model: "m1" };
+const deadAdapter = new OllamaAdapter(fakeSettings, async () => {
+  throw new Error("ECONNREFUSED");
+});
+assert((await deadAdapter.isAvailable()) === false, "адаптер: сервер недоступен — isAvailable=false без краха");
+try {
+  await deadAdapter.parseDescription("текст", "terrain");
+  assert(false, "недоступный сервер должен дать ModelError");
+} catch (e) {
+  assert(e instanceof ModelError && e.code === "unavailable", "адаптер: недоступность → понятный ModelError");
+}
+const okAdapter = new OllamaAdapter(fakeSettings, async (url) => {
+  if (url.endsWith("/api/tags")) {
+    return new Response(JSON.stringify({ models: [{ name: "m1" }, { name: "m2" }] }), { status: 200 });
+  }
+  return new Response(
+    JSON.stringify({ response: '{"relief": 0.6, "pointDensity": 0.2}' }),
+    { status: 200 },
+  );
+});
+assert(JSON.stringify(await okAdapter.listModels()) === '["m1","m2"]', "адаптер: список локальных моделей");
+const okSuggestion = await okAdapter.parseDescription("описание", "terrain");
+assert((okSuggestion.spec as { relief: number }).relief === 0.6, "адаптер: валидный ответ → предложение параметров");
+const errAdapter = new OllamaAdapter(fakeSettings, async () => new Response("boom", { status: 500 }));
+try {
+  await errAdapter.parseDescription("текст", "structure");
+  assert(false, "HTTP 500 должен дать ModelError");
+} catch (e) {
+  assert(e instanceof ModelError, "адаптер: HTTP-ошибка → ModelError");
+}
+const badJsonAdapter = new OllamaAdapter(fakeSettings, async () =>
+  new Response(JSON.stringify({ response: "модель промямлила" }), { status: 200 }),
+);
+try {
+  await badJsonAdapter.parseDescription("текст", "terrain");
+  assert(false, "не-JSON ответ модели должен быть отклонён");
+} catch (e) {
+  assert(e instanceof ModelError && e.code === "invalid-response", "не-JSON ответ модели отклоняется");
+}
+try {
+  new OllamaAdapter({ enabled: true, host: "http://example.com:11434", model: "m" }, async () => new Response(""));
+  assert(false, "внешний хост должен быть отклонён");
+} catch (e) {
+  assert(e instanceof ModelError && e.code === "not-enabled", "адаптер: только 127.0.0.1/localhost");
+}
+
+// Детерминизм: распознанный spec + зерно дают воспроизводимый результат
+const recognizedSpec = {
+  seed: "модель-1",
+  ...sanitizeModelOutput('{"relief": 0.7, "areaDensity": 0.6, "lineDensity": 0.4}', "terrain").spec,
+  bounds: { x: -500, y: -400, width: 1000, height: 800 },
+  typeMapping: baseGenSpec.typeMapping,
+  labels: { enabled: false },
+} as Parameters<typeof generate>[0];
+const projectRecA = createProject("Модель-A");
+const recA = applyGenerationToMap(projectRecA, projectRecA.rootMapId, recognizedSpec);
+const projectRecB = createProject("Модель-B");
+const recB = applyGenerationToMap(projectRecB, projectRecB.rootMapId, recognizedSpec);
+assert(
+  JSON.stringify(recA.project.maps[recA.project.rootMapId].primitives.map((p) => p.kind)) ===
+    JSON.stringify(recB.project.maps[recB.project.rootMapId].primitives.map((p) => p.kind)),
+  "детерминизм: распознанный spec + зерно воспроизводимы",
+);
 
 console.log(`\nВсе ${passed} проверок пройдены`);

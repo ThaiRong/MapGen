@@ -73,6 +73,14 @@ import type {
 } from "../core/types";
 import { deriveSeed } from "../core/generation/structure/rng";
 import {
+  DEFAULT_MODEL_SETTINGS,
+  ModelError,
+  type ModelMode,
+  type ModelSettings,
+  type SpecSuggestion,
+} from "../core/model/adapter";
+import { createAdapter } from "../core/model/ollama";
+import {
   createEmptyProfile,
   validateSettingProfile,
   type ProfileValidationResult,
@@ -111,6 +119,21 @@ export interface LabelDraft {
 }
 
 const storage = createStorage();
+
+const MODEL_SETTINGS_KEY = "mapgen-model-settings";
+
+function loadModelSettings(): ModelSettings {
+  try {
+    const raw = localStorage.getItem(MODEL_SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<ModelSettings>;
+      return { ...DEFAULT_MODEL_SETTINGS, ...parsed };
+    }
+  } catch {
+    // localStorage недоступен (тесты) — работаем с дефолтом
+  }
+  return DEFAULT_MODEL_SETTINGS;
+}
 
 /**
  * Профиль итерации 5: проект самодостаточен за счёт снапшота.
@@ -268,6 +291,14 @@ export interface AppState {
   saveProfile: (profile: SettingProfile) => Promise<void>;
   applyProfileById: (id: string) => void;
   detachActiveProfile: (keepSnapshot: boolean) => void;
+
+  /* Локальная модель (итерация 6) */
+  modelSettings: ModelSettings;
+  modelStatus: "off" | "unknown" | "checking" | "available" | "unavailable";
+  modelList: string[];
+  setModelSettings: (patch: Partial<ModelSettings>) => void;
+  checkModelConnection: () => Promise<void>;
+  recognizeDescription: (text: string, mode: ModelMode) => Promise<SpecSuggestion | null>;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -438,6 +469,9 @@ export const useAppStore = create<AppState>()((set, get) => {
     structureKindPreset: null,
     profilesList: [],
     profilesLoaded: false,
+    modelSettings: loadModelSettings(),
+    modelStatus: loadModelSettings().enabled ? "unknown" : "off",
+    modelList: [],
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -650,6 +684,72 @@ export const useAppStore = create<AppState>()((set, get) => {
           ? "Вид локации назначен — «Сгенерировать локацию» использует его параметры"
           : "Вид локации снят",
       );
+    },
+
+    setModelSettings: (patch) => {
+      const next = { ...get().modelSettings, ...patch };
+      set({
+        modelSettings: next,
+        modelStatus: next.enabled ? "unknown" : "off",
+        ...(next.enabled ? null : { modelList: [] }),
+      });
+      try {
+        localStorage.setItem(MODEL_SETTINGS_KEY, JSON.stringify(next));
+      } catch {
+        // localStorage недоступен — настройки живут в сессии
+      }
+    },
+
+    checkModelConnection: async () => {
+      const { modelSettings } = get();
+      if (!modelSettings.enabled) {
+        set({ modelStatus: "off", modelList: [] });
+        return;
+      }
+      set({ modelStatus: "checking" });
+      try {
+        const adapter = createAdapter(modelSettings);
+        if (!(await adapter.isAvailable())) {
+          set({ modelStatus: "unavailable", modelList: [] });
+          return;
+        }
+        const models = await adapter.listModels();
+        set({ modelStatus: "available", modelList: models });
+        if (!get().modelSettings.model && models.length > 0) {
+          get().setModelSettings({ model: models[0] });
+        }
+      } catch {
+        set({ modelStatus: "unavailable", modelList: [] });
+      }
+    },
+
+    recognizeDescription: async (text, mode) => {
+      const { modelSettings } = get();
+      if (!modelSettings.enabled) {
+        set({
+          status: "Локальная модель выключена — задайте параметры вручную или включите её в блоке «Модель»",
+        });
+        return null;
+      }
+      if (!modelSettings.model) {
+        set({ status: "Не выбрана модель — проверьте соединение и выберите модель в блоке «Модель»" });
+        return null;
+      }
+      try {
+        const adapter = createAdapter(modelSettings);
+        const suggestion = await adapter.parseDescription(text, mode);
+        set({
+          status: `Распознано параметров: ${suggestion.recognized.length}. Проверьте предложение и подставьте в форму — зерно остаётся вашим`,
+        });
+        return suggestion;
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Модель недоступна";
+        set({ status: `${message} — параметры можно задать вручную` });
+        if (e instanceof ModelError && (e.code === "unavailable" || e.code === "timeout")) {
+          set({ modelStatus: "unavailable" });
+        }
+        return null;
+      }
     },
 
     refreshProfiles: async () => {

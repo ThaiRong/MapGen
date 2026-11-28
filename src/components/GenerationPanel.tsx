@@ -8,6 +8,7 @@ import type {
   StructureArchetype,
   StructureSpec,
 } from "../core/types";
+import type { ModelMode, SpecSuggestion } from "../core/model/adapter";
 import { useAppStore } from "../state/store";
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -31,6 +32,7 @@ export default function GenerationPanel() {
 
   return (
     <div className="gen-panel">
+      <ModelBlock />
       <div className="gen-tabs">
         <button
           className={mode === "terrain" ? "active" : undefined}
@@ -46,6 +48,159 @@ export default function GenerationPanel() {
         </button>
       </div>
       {mode === "terrain" ? <TerrainSection /> : <StructureSection />}
+    </div>
+  );
+}
+
+/* ================= Локальная модель (итерация 6) ================= */
+
+/**
+ * Блок настроек локальной модели. Выключена по умолчанию; единственное
+ * допустимое соединение — локальный Ollama (127.0.0.1/localhost).
+ */
+function ModelBlock() {
+  const settings = useAppStore((s) => s.modelSettings);
+  const status = useAppStore((s) => s.modelStatus);
+  const modelList = useAppStore((s) => s.modelList);
+  const setModelSettings = useAppStore((s) => s.setModelSettings);
+  const checkModelConnection = useAppStore((s) => s.checkModelConnection);
+
+  const statusText: Record<typeof status, string> = {
+    off: "выключена",
+    unknown: "соединение не проверено",
+    checking: "проверка…",
+    available: `доступна, моделей: ${modelList.length}`,
+    unavailable: "недоступна",
+  };
+
+  return (
+    <div className="gen-model">
+      <label className="gen-model-head">
+        <input
+          type="checkbox"
+          checked={settings.enabled}
+          onChange={(e) => setModelSettings({ enabled: e.target.checked })}
+        />
+        Локальная модель (опционально)
+      </label>
+      {settings.enabled && (
+        <div className="gen-model-body">
+          <div className="field">
+            <label>Адрес (только 127.0.0.1 / localhost)</label>
+            <input
+              type="text"
+              key={settings.host}
+              defaultValue={settings.host}
+              onBlur={(e) => setModelSettings({ host: e.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label>Модель</label>
+            <select
+              className="select"
+              value={settings.model}
+              onChange={(e) => setModelSettings({ model: e.target.value })}
+            >
+              <option value="">— не выбрана —</option>
+              {modelList.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              {settings.model && !modelList.includes(settings.model) && (
+                <option value={settings.model}>{settings.model} (не найдена)</option>
+              )}
+            </select>
+          </div>
+          <div className="row">
+            <button onClick={() => void checkModelConnection()}>Проверить соединение</button>
+          </div>
+          <div className={`gen-model-status gen-model-status-${status}`}>{statusText[status]}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Поле «Описание» + распознавание моделью с предпросмотром результата. */
+function RecognizeBlock({
+  mode,
+  onApply,
+}: {
+  mode: ModelMode;
+  onApply: (spec: Record<string, unknown>) => void;
+}) {
+  const enabled = useAppStore((s) => s.modelSettings.enabled && !!s.modelSettings.model);
+  const status = useAppStore((s) => s.modelStatus);
+  const recognizeDescription = useAppStore((s) => s.recognizeDescription);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [suggestion, setSuggestion] = useState<SpecSuggestion | null>(null);
+
+  const run = async () => {
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    setSuggestion(null);
+    const result = await recognizeDescription(text.trim(), mode);
+    setBusy(false);
+    if (result) setSuggestion(result);
+  };
+
+  return (
+    <div className="gen-recognize">
+      <div className="field">
+        <label>Описание своими словами (модель переведёт его в параметры)</label>
+        <textarea
+          className="textarea"
+          rows={3}
+          value={text}
+          placeholder={mode === "terrain" ? "Например: пересечённая местность с редкими протоками…" : "Например: плотная ячеистая застройка с тремя вложенными локациями…"}
+          onChange={(e) => setText(e.target.value)}
+        />
+      </div>
+      <div className="row">
+        <button
+          disabled={!enabled || !text.trim() || busy}
+          title={enabled ? "Перевести описание в параметры" : "Включите модель и выберите её в блоке «Модель»"}
+          onClick={() => void run()}
+        >
+          {busy ? "Распознавание…" : "Распознать"}
+        </button>
+        {!enabled && status === "unavailable" && (
+          <span className="hint">Модель недоступна — параметры задаются вручную</span>
+        )}
+      </div>
+      {suggestion && (
+        <div className="gen-suggestion">
+          <div className="gen-suggestion-title">Предложение модели — проверьте и подставьте:</div>
+          <ul className="gen-suggestion-list">
+            {suggestion.recognized.map((r) => (
+              <li key={r.key}>
+                {r.key}: {r.value}
+              </li>
+            ))}
+          </ul>
+          {suggestion.warnings.length > 0 && (
+            <div className="gen-warnings">
+              {suggestion.warnings.map((w, i) => (
+                <div key={i}>{w}</div>
+              ))}
+            </div>
+          )}
+          <div className="row">
+            <button
+              className="active"
+              onClick={() => {
+                onApply(suggestion.spec as Record<string, unknown>);
+                setSuggestion(null);
+              }}
+            >
+              Подставить в форму
+            </button>
+            <button onClick={() => setSuggestion(null)}>Отбросить</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -262,6 +417,24 @@ function TerrainSection() {
           </select>
         </div>
       )}
+      <RecognizeBlock
+        mode="terrain"
+        onApply={(spec) => {
+          const s = spec as Partial<GenerationSpec>;
+          setParams((prev) => ({
+            ...prev,
+            relief: s.relief ?? prev.relief,
+            moisture: s.moisture ?? prev.moisture,
+            temperature: s.temperature ?? prev.temperature,
+            fluidLevel: s.fluidLevel ?? prev.fluidLevel,
+            areaDensity: s.areaDensity ?? prev.areaDensity,
+            lineDensity: s.lineDensity ?? prev.lineDensity,
+            pointDensity: s.pointDensity ?? prev.pointDensity,
+            detail: s.detail ?? prev.detail,
+            fieldScale: s.fieldScale ?? prev.fieldScale,
+          }));
+        }}
+      />
       <SeedRow seed={params.seed} onChange={(seed) => patch({ seed })} />
       <Slider label="Рельеф" value={params.relief} onChange={(v) => patch({ relief: v })} />
       <Slider label="Влажность" value={params.moisture} onChange={(v) => patch({ moisture: v })} />
@@ -642,6 +815,25 @@ function StructureSection() {
           </select>
         </div>
       )}
+      <RecognizeBlock
+        mode="structure"
+        onApply={(spec) => {
+          const s = spec as Partial<StructureSpec>;
+          setParams((prev) => ({
+            ...prev,
+            archetype: s.archetype ?? prev.archetype,
+            density: s.density ?? prev.density,
+            cellScale: s.cellScale ?? prev.cellScale,
+            irregularity: s.irregularity ?? prev.irregularity,
+            connectivity: s.connectivity ?? prev.connectivity,
+            sizeVariance: s.sizeVariance ?? prev.sizeVariance,
+            pointDensity: s.pointDensity ?? prev.pointDensity,
+            nestedCount: s.nestedCount ?? prev.nestedCount,
+            margin: s.margin ?? prev.margin,
+            detail: s.detail ?? prev.detail,
+          }));
+        }}
+      />
       <div className="field">
         <label>Архетип (структурное имя, без сеттинга)</label>
         <select
