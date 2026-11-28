@@ -3,6 +3,7 @@ import {
   PROJECT_VERSION,
   type ArchivedMarker,
   type EntityId,
+  type FogState,
   type LegendShape,
   type LegendType,
   type LinePrimitive,
@@ -20,6 +21,7 @@ import {
 } from "./types";
 import { generate } from "./generation/generate";
 import { generateStructure } from "./generation/structure/generateStructure";
+import { emptyFog } from "./fog";
 import { nameFor, validateSettingProfile } from "./profiles";
 
 export class ValidationError extends Error {
@@ -950,6 +952,7 @@ export type PrimitivePatch = Partial<{
   typeId: string;
   text: string;
   fontSize: number;
+  playerVisible: boolean;
 }>;
 
 export function updatePrimitive(
@@ -993,6 +996,7 @@ export function updatePrimitive(
       visible: p.visible,
       locked: p.locked,
       typeId: p.typeId,
+      playerVisible: p.playerVisible !== false,
       text: p.kind === "label" ? p.text : undefined,
       fontSize: p.kind === "label" ? p.fontSize : undefined,
     });
@@ -1550,6 +1554,10 @@ function validateEntityShape(raw: unknown, where: string): LocationLinkEntity {
   if (typeof raw.generationId === "string" && raw.generationId) {
     entity.generationId = raw.generationId;
   }
+  // Флаг видимости игроку (итерация 7): по умолчанию true.
+  if (raw.playerVisible === false) {
+    entity.playerVisible = false;
+  }
   return entity;
 }
 
@@ -1660,6 +1668,10 @@ function tryValidatePrimitive(raw: unknown, legend: LegendType[]): Primitive | n
     if (origin === "generated" && typeof raw.generationId === "string" && raw.generationId) {
       (base as Record<string, unknown>).generationId = raw.generationId;
     }
+    // Флаг видимости игроку (итерация 7): по умолчанию true.
+    if (raw.playerVisible === false) {
+      (base as Record<string, unknown>).playerVisible = false;
+    }
     // typeId: должен ссылаться на существующий тип той же формы;
     // иначе — фолбэк на первый подходящий тип, а если типов такой
     // формы нет — примитив выбрасывается (безопасно, не краш).
@@ -1711,6 +1723,37 @@ function validatePrimitives(raw: unknown, legend: LegendType[], where: string): 
     if (primitive) result.push(primitive);
   }
   return result;
+}
+
+/**
+ * Толерантный разбор тумана (итерация 7): отсутствие поля у старых
+ * карт — всё раскрыто (undefined); битые маски отбрасываются без краха.
+ */
+function tryValidateFog(raw: unknown): FogState | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isRecord(raw)) return undefined;
+  const fog = emptyFog();
+  for (const category of ["landscape", "topography", "objects"] as const) {
+    const mask = raw[category];
+    if (!isRecord(mask)) continue;
+    fog[category] = {
+      inverted: mask.inverted === true,
+      tiles: Array.isArray(mask.tiles)
+        ? mask.tiles.filter((t): t is number => typeof t === "number" && Number.isInteger(t)).sort((a, b) => a - b)
+        : [],
+    };
+  }
+  return fog;
+}
+
+/** Обновляет туман карты (одна запись истории на действие мастера). */
+export function setMapFog(project: Project, mapId: MapId, fog: FogState): Project {
+  const map = project.maps[mapId];
+  if (!map) throw new Error("Карта не найдена");
+  return touch({
+    ...project,
+    maps: { ...project.maps, [mapId]: { ...map, fog, updatedAt: now() } },
+  });
 }
 
 /**
@@ -1848,6 +1891,7 @@ export function validateProject(raw: unknown): Project {
     }
     map.entities = map.entities.map((e, i) => validateEntity(e, maps, `Карта «${map.name}», сущность №${i + 1}`));
     map.primitives = validatePrimitives(map.primitives, legend, `Карта «${map.name}»`);
+    map.fog = tryValidateFog(map.fog);
     map.generation = tryValidateGeneration(map.generation);
   }
 

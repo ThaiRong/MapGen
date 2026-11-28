@@ -26,7 +26,8 @@ export type OperationType =
   | "archive.cleared"
   | "map.generated"
   | "profile.applied"
-  | "marker.kindChanged";
+  | "marker.kindChanged"
+  | "fog.changed";
 
 export interface MarkerRestoreInfo {
   kind: "marker";
@@ -223,6 +224,7 @@ const OPERATION_TYPES = new Set<string>([
   "map.generated",
   "profile.applied",
   "marker.kindChanged",
+  "fog.changed",
 ]);
 
 function isIsoDate(value: unknown): boolean {

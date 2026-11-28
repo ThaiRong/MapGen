@@ -54,6 +54,8 @@ export interface MapNode {
   entities: Entity[];
   /** Нарисованные вручную примитивы (итерация 2). */
   primitives: Primitive[];
+  /** Туман войны: три независимые маски (итерация 7). */
+  fog?: FogState;
   /** Последнее применение генерации на этой карте (итерация 3/4). */
   generation?: MapGeneration;
   /** Карта создана как вложенная при генерации структуры (итерация 4). */
@@ -61,6 +63,30 @@ export interface MapNode {
   view?: MapView;
   createdAt: string;
   updatedAt: string;
+}
+
+/* ---------- Туман войны (итерация 7) ---------- */
+
+/** Категории тумана — независимые маски. */
+export type FogCategory = "landscape" | "topography" | "objects";
+
+/**
+ * Маска одной категории. Мир бесконечен, поэтому храним разреженное
+ * множество скрытых тайлов + флаг инверсии:
+ * скрыто = inverted XOR (тайл в множестве).
+ * По умолчанию (нет fog) — всё раскрыто (миграция старых карт).
+ */
+export interface FogMask {
+  /** false: скрыты только тайлы из tiles; true: скрыто всё, КРОМЕ tiles. */
+  inverted: boolean;
+  /** Отсортированные упакованные ключи тайлов. */
+  tiles: number[];
+}
+
+export interface FogState {
+  landscape: FogMask;
+  topography: FogMask;
+  objects: FogMask;
 }
 
 export type Entity = LocationLinkEntity;
@@ -77,6 +103,8 @@ export interface LocationLinkEntity {
   generationId?: string;
   /** Вид локации из профиля, необязательно (итерация 5). */
   kindId?: string;
+  /** Флаг «показывать игрокам» (итерация 7/8); по умолчанию true. */
+  playerVisible?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -264,6 +292,8 @@ interface PrimitiveBase {
   origin: PrimitiveOrigin;
   /** Для origin='generated' — id применения генерации (защита правок). */
   generationId?: string;
+  /** Флаг «показывать игрокам» (итерация 7/8); по умолчанию true. */
+  playerVisible?: boolean;
   /** Произвольная заметка мастера. */
   note: string;
   visible: boolean;

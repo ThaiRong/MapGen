@@ -37,6 +37,7 @@ import {
   restoreMarkerFromRecord,
   restorePrimitiveToMap,
   rotatePrimitive,
+  setMapFog,
   setMapScale,
   setMapView,
   setMarkerKind,
@@ -58,6 +59,8 @@ import {
 } from "../core/history";
 import type {
   EntityId,
+  FogCategory,
+  FogState,
   GenerationSpec,
   LegendShape,
   LocationKind,
@@ -72,6 +75,16 @@ import type {
   Vec2,
 } from "../core/types";
 import { deriveSeed } from "../core/generation/structure/rng";
+import {
+  countHiddenTiles,
+  emptyFog,
+  hideAllMask,
+  invertMask,
+  mapFogCategories,
+  maskForPolygon,
+  paintFogCircle,
+  revealAllMask,
+} from "../core/fog";
 import {
   DEFAULT_MODEL_SETTINGS,
   ModelError,
@@ -106,6 +119,7 @@ export type Tool =
   | "area"
   | "pen"
   | "label"
+  | "fog"
   | "delete";
 
 export interface DrawingDraft {
@@ -196,6 +210,37 @@ function sanitize(
 function positionDescription(history: ProjectHistory): string {
   if (history.position < 0) return "начало проекта";
   return history.entries[history.position]?.description ?? "";
+}
+
+function pointInPolygonStore(p: Vec2, poly: Vec2[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function bboxPolygon(points: Vec2[], pad: number): Vec2[] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  return [
+    { x: minX - pad, y: minY - pad },
+    { x: maxX + pad, y: minY - pad },
+    { x: maxX + pad, y: maxY + pad },
+    { x: minX - pad, y: maxY + pad },
+  ];
 }
 
 export interface AppState {
@@ -299,6 +344,25 @@ export interface AppState {
   setModelSettings: (patch: Partial<ModelSettings>) => void;
   checkModelConnection: () => Promise<void>;
   recognizeDescription: (text: string, mode: ModelMode) => Promise<SpecSuggestion | null>;
+
+  /* Туман войны (итерация 7) */
+  fogRadius: number;
+  fogReveal: boolean;
+  fogCategories: FogCategory[];
+  fogOverlayVisible: boolean;
+  /** Черновик штриха: живёт вне истории, коммитится одним действием. */
+  fogDraft: FogState | null;
+  setFogRadius: (r: number) => void;
+  setFogReveal: (reveal: boolean) => void;
+  toggleFogCategory: (category: FogCategory) => void;
+  toggleFogOverlay: () => void;
+  fogStrokeBegin: () => void;
+  fogStrokePaint: (x: number, y: number) => void;
+  fogStrokeEnd: () => void;
+  fogEntityAt: (x: number, y: number, reveal: boolean) => void;
+  fogSetAll: (reveal: boolean) => void;
+  fogInvert: () => void;
+  fogHiddenCountForConfirm: (reveal: boolean) => number;
   openMap: (id: MapId) => void;
   openParent: () => void;
   newProject: () => void;
@@ -472,6 +536,11 @@ export const useAppStore = create<AppState>()((set, get) => {
     modelSettings: loadModelSettings(),
     modelStatus: loadModelSettings().enabled ? "unknown" : "off",
     modelList: [],
+    fogRadius: 120,
+    fogReveal: true,
+    fogCategories: ["landscape", "topography", "objects"],
+    fogOverlayVisible: true,
+    fogDraft: null,
     tool: "select",
     drawingDraft: null,
     labelDraft: null,
@@ -750,6 +819,165 @@ export const useAppStore = create<AppState>()((set, get) => {
         }
         return null;
       }
+    },
+
+    setFogRadius: (r) => set({ fogRadius: Math.max(32, Math.min(600, Math.round(r))) }),
+    setFogReveal: (reveal) => set({ fogReveal: reveal }),
+    toggleFogCategory: (category) => {
+      const current = get().fogCategories;
+      const next = current.includes(category)
+        ? current.filter((c) => c !== category)
+        : [...current, category];
+      // Хотя бы одна категория должна остаться выбранной.
+      set({ fogCategories: next.length > 0 ? next : current });
+    },
+    toggleFogOverlay: () => set({ fogOverlayVisible: !get().fogOverlayVisible }),
+
+    fogStrokeBegin: () => {
+      const { project, activeMapId } = get();
+      const fog = project.maps[activeMapId]?.fog ?? emptyFog();
+      set({ fogDraft: fog });
+    },
+
+    fogStrokePaint: (x, y) => {
+      const { fogDraft, fogRadius, fogReveal, fogCategories } = get();
+      if (!fogDraft) return;
+      const next = mapFogCategories(fogDraft, fogCategories, (mask) =>
+        paintFogCircle(mask, x, y, fogRadius, fogReveal),
+      );
+      if (next !== fogDraft) set({ fogDraft: next });
+    },
+
+    fogStrokeEnd: () => {
+      const { fogDraft, project, activeMapId, fogReveal } = get();
+      if (!fogDraft) return;
+      set({ fogDraft: null });
+      const map = project.maps[activeMapId];
+      if (!map) return;
+      const current = map.fog ?? emptyFog();
+      if (current === fogDraft) return;
+      // Один штрих (или группа штрихов за жест) — одна запись истории.
+      apply(
+        setMapFog(project, activeMapId, fogDraft),
+        {
+          operationType: "fog.changed",
+          description: `Туман ${fogReveal ? "раскрыт" : "скрыт"} кистью`,
+          mapId: activeMapId,
+        },
+        fogReveal ? "Туман раскрыт" : "Туман скрыт",
+      );
+    },
+
+    fogEntityAt: (x, y, reveal) => {
+      const { project, activeMapId, fogCategories } = get();
+      const map = project.maps[activeMapId];
+      if (!map) return;
+      // Маркеры приоритетнее примитивов.
+      let polygon: Vec2[] | null = null;
+      let label = "";
+      for (let i = map.entities.length - 1; i >= 0; i -= 1) {
+        const e = map.entities[i];
+        if (Math.hypot(e.x - x, e.y - y) <= 28) {
+          polygon = [
+            { x: e.x - 28, y: e.y - 28 },
+            { x: e.x + 28, y: e.y - 28 },
+            { x: e.x + 28, y: e.y + 28 },
+            { x: e.x - 28, y: e.y + 28 },
+          ];
+          label = e.label;
+          break;
+        }
+      }
+      if (!polygon) {
+        for (let i = map.primitives.length - 1; i >= 0; i -= 1) {
+          const p = map.primitives[i];
+          const pts = p.kind === "line" || p.kind === "area" ? p.points : [{ x: p.x, y: p.y }];
+          const near = pts.some((pt) => Math.hypot(pt.x - x, pt.y - y) <= 36);
+          const inside = p.kind === "area" && pointInPolygonStore({ x, y }, p.points);
+          if (near || inside) {
+            polygon = bboxPolygon(pts, 24);
+            label = p.kind === "label" && p.text.trim() ? p.text.trim() : p.name;
+            break;
+          }
+        }
+      }
+      if (!polygon) {
+        set({ status: "Под курсором нет сущности — кликните по маркеру или примитиву" });
+        return;
+      }
+      const next = mapFogCategories(map.fog ?? emptyFog(), fogCategories, (mask) =>
+        maskForPolygon(mask, polygon!, reveal),
+      );
+      apply(
+        setMapFog(project, activeMapId, next),
+        {
+          operationType: "fog.changed",
+          description: `Туман ${reveal ? "раскрыт" : "скрыт"} для «${label}»`,
+          mapId: activeMapId,
+        },
+        `Туман ${reveal ? "раскрыт" : "скрыт"} для «${label}»`,
+      );
+    },
+
+    fogSetAll: (reveal) => {
+      const { project, activeMapId, fogCategories } = get();
+      const map = project.maps[activeMapId];
+      if (!map) return;
+      const next = mapFogCategories(map.fog ?? emptyFog(), fogCategories, () =>
+        reveal ? revealAllMask() : hideAllMask(),
+      );
+      apply(
+        setMapFog(project, activeMapId, next),
+        {
+          operationType: "fog.changed",
+          description: reveal ? "Туман раскрыт полностью" : "Туман скрыт полностью",
+          mapId: activeMapId,
+        },
+        reveal ? "Туман раскрыт полностью" : "Туман скрыт полностью",
+      );
+    },
+
+    fogInvert: () => {
+      const { project, activeMapId, fogCategories } = get();
+      const map = project.maps[activeMapId];
+      if (!map) return;
+      const next = mapFogCategories(map.fog ?? emptyFog(), fogCategories, invertMask);
+      apply(
+        setMapFog(project, activeMapId, next),
+        {
+          operationType: "fog.changed",
+          description: "Туман инвертирован",
+          mapId: activeMapId,
+        },
+        "Туман инвертирован",
+      );
+    },
+
+    fogHiddenCountForConfirm: (reveal) => {
+      // Число тайлов, которые изменит массовая операция, в текущем виде.
+      const { project, activeMapId, fogCategories, generationViewport } = get();
+      const map = project.maps[activeMapId];
+      if (!map) return 0;
+      const fog = map.fog ?? emptyFog();
+      const vp = generationViewport ?? { centerX: 0, centerY: 0, zoom: 1, w: 1200, h: 800 };
+      const bounds = {
+        x: vp.centerX - vp.w / (2 * vp.zoom),
+        y: vp.centerY - vp.h / (2 * vp.zoom),
+        width: vp.w / vp.zoom,
+        height: vp.h / vp.zoom,
+      };
+      const min = { tx: Math.floor(bounds.x / 64), ty: Math.floor(bounds.y / 64) };
+      const max = {
+        tx: Math.floor((bounds.x + bounds.width) / 64),
+        ty: Math.floor((bounds.y + bounds.height) / 64),
+      };
+      const totalTiles = (max.tx - min.tx + 1) * (max.ty - min.ty + 1);
+      let hidden = 0;
+      for (const category of fogCategories) {
+        hidden += countHiddenTiles(fog[category], bounds);
+      }
+      // «Раскрыть всё» меняет скрытые тайлы; «скрыть всё» — видимые.
+      return reveal ? hidden : totalTiles * fogCategories.length - hidden;
     },
 
     refreshProfiles: async () => {

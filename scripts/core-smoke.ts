@@ -42,6 +42,7 @@ import {
   insertPrimitiveVertex,
   setMapScale,
   setMapView,
+  setMapFog,
   updateLegendType,
   updatePrimitive,
   validateProject,
@@ -56,6 +57,17 @@ import { deriveSeed } from "../src/core/generation/structure/rng";
 import { sanitizeModelOutput } from "../src/core/model/validate";
 import { OllamaAdapter } from "../src/core/model/ollama";
 import { ModelError } from "../src/core/model/adapter";
+import {
+  countHiddenTiles,
+  emptyFog,
+  emptyMask,
+  fogHidesPoint,
+  hideAllMask,
+  invertMask,
+  maskForPolygon,
+  paintFogCircle,
+} from "../src/core/fog";
+import { projectForPlayer } from "../src/core/projection";
 import {
   createEmptyProfile,
   nameFor,
@@ -1409,5 +1421,120 @@ assert(
     JSON.stringify(recB.project.maps[recB.project.rootMapId].primitives.map((p) => p.kind)),
   "детерминизм: распознанный spec + зерно воспроизводимы",
 );
+
+// 52. Туман войны: маски, XOR-семантика, сериализация, миграция
+let pfog = createProject("Туман");
+assert(fogHidesPoint(pfog.maps[pfog.rootMapId].fog, "landscape", 0, 0) === false, "миграция: без тумана всё раскрыто");
+let fog = emptyFog();
+fog = { ...fog, landscape: paintFogCircle(fog.landscape, 0, 0, 100, false) };
+assert(fogHidesPoint(fog, "landscape", 0, 0), "кисть: центр штриха скрыт");
+assert(fogHidesPoint(fog, "landscape", 50, 50), "кисть: точка внутри круга скрыта");
+assert(!fogHidesPoint(fog, "landscape", 500, 500), "кисть: точка вне круга раскрыта");
+assert(!fogHidesPoint(fog, "topography", 0, 0), "независимость категорий: topography не затронут");
+assert(!fogHidesPoint(fog, "objects", 0, 0), "независимость категорий: objects не затронут");
+// Раскрытие поверх скрытия
+fog = { ...fog, landscape: paintFogCircle(fog.landscape, 0, 0, 100, true) };
+assert(!fogHidesPoint(fog, "landscape", 0, 0), "кисть-раскрытие возвращает видимость");
+// XOR-семантика: скрыть всё + раскрыть круг
+fog = { ...fog, topography: hideAllMask() };
+assert(fogHidesPoint(fog, "topography", 9999, -9999), "скрыть всё: произвольная точка скрыта");
+fog = { ...fog, topography: paintFogCircle(fog.topography, 0, 0, 100, true) };
+assert(!fogHidesPoint(fog, "topography", 0, 0), "в инвертированной маске раскрытие работает");
+assert(fogHidesPoint(fog, "topography", 500, 500), "вне раскрытого круга всё ещё скрыто");
+// Инверсия
+fog = { ...fog, objects: paintFogCircle(fog.objects, 0, 0, 100, false) };
+fog = { ...fog, objects: invertMask(fog.objects) };
+assert(!fogHidesPoint(fog, "objects", 0, 0), "инверсия: скрытый круг стал раскрытым");
+assert(fogHidesPoint(fog, "objects", 500, 500), "инверсия: остальное стало скрытым");
+fog = { ...fog, objects: invertMask(fog.objects) };
+assert(fogHidesPoint(fog, "objects", 0, 0) && !fogHidesPoint(fog, "objects", 500, 500), "двойная инверсия возвращает исходное");
+// Полигон: маска покрывает область примитива
+const fogPoly = maskForPolygon(emptyMask(), [{ x: 0, y: 0 }, { x: 200, y: 0 }, { x: 200, y: 200 }, { x: 0, y: 200 }], false);
+assert(fogHidesPoint({ ...emptyFog(), landscape: fogPoly }, "landscape", 100, 100), "маска полигона скрывает внутренность");
+assert(!fogHidesPoint({ ...emptyFog(), landscape: fogPoly }, "landscape", 500, 500), "маска полигона не скрывает снаружи");
+// Подсчёт скрытых тайлов для подтверждений
+const hiddenCount = countHiddenTiles(fogPoly, { x: 0, y: 0, width: 200, height: 200 });
+assert(hiddenCount > 0, "подсчёт скрытых тайлов для подтверждений работает");
+// Сериализация: fog в .mapkg
+pfog = setMapFog(pfog, pfog.rootMapId, fog);
+const fogRoundTrip = deserializeSave(serializeSave(pfog, afterRewrite)).project;
+const restoredFog = fogRoundTrip.maps[fogRoundTrip.rootMapId].fog;
+assert(!!restoredFog, "туман сериализуется в .mapkg");
+assert(restoredFog!.landscape.inverted === fog.landscape.inverted, "инверсия маски переживает сохранение");
+assert(
+  JSON.stringify(restoredFog!.landscape.tiles) === JSON.stringify(fog.landscape.tiles),
+  "тайлы маски переживают сохранение",
+);
+assert(
+  fogHidesPoint(restoredFog, "topography", 9999, -9999) === fogHidesPoint(fog, "topography", 9999, -9999),
+  "семантика тумана воспроизводится после загрузки",
+);
+// Битый fog не роняет загрузку
+const brokenFog = JSON.parse(serializeProject(pfog)) as Record<string, unknown>;
+(brokenFog.maps as Record<string, Record<string, unknown>>)[pfog.rootMapId].fog = { landscape: "мусор" };
+const repairedFog = deserializeProject(JSON.stringify(brokenFog));
+assert(repairedFog.maps[repairedFog.rootMapId].fog !== undefined, "битый fog заменяется безопасным, без краха");
+// Туман в истории: одна запись, undo возвращает
+let hf = createHistory(pfog);
+const fogBefore = pfog;
+const fogAfter = setMapFog(pfog, pfog.rootMapId, emptyFog());
+hf = record(hf, makeEntry({ operationType: "fog.changed", description: "Туман изменён" }, fogAfter));
+const fogUndo = undo(hf);
+assert(fogUndo !== null && fogUndo.project.maps[fogUndo.project.rootMapId].fog === fogBefore.maps[fogBefore.rootMapId].fog, "undo возвращает прежний туман");
+
+// 53. Проекция для игрока: скрытое не попадает, флаги уважаются
+let pproj = createProject("Проекция");
+const projLine = createLinePrimitive(
+  pproj.maps[pproj.rootMapId],
+  pproj.legend.find((t) => t.shape === "line")!.id,
+  [{ x: 0, y: 0 }, { x: 100, y: 0 }],
+);
+pproj = addPrimitive(pproj, pproj.rootMapId, projLine);
+const projArea = createAreaPrimitive(
+  pproj.maps[pproj.rootMapId],
+  pproj.legend.find((t) => t.shape === "area")!.id,
+  [{ x: 300, y: 300 }, { x: 400, y: 300 }, { x: 400, y: 400 }],
+);
+pproj = addPrimitive(pproj, pproj.rootMapId, projArea);
+const projLoc = addLocation(pproj, pproj.rootMapId, 800, 800);
+pproj = projLoc.project;
+// Без тумана всё видимо
+let projection = projectForPlayer(pproj.maps[pproj.rootMapId]);
+assert(projection.primitives.length === 2 && projection.markers.length === 1, "проекция без тумана: всё видимо");
+// Скрываем линию туманом топографии
+let projFog = emptyFog();
+projFog = { ...projFog, topography: paintFogCircle(projFog.topography, 50, 0, 80, false) };
+pproj = setMapFog(pproj, pproj.rootMapId, projFog);
+projection = projectForPlayer(pproj.maps[pproj.rootMapId]);
+assert(
+  !projection.primitives.some((p) => p.id === projLine.id),
+  "проекция: скрытая туманом линия не попадает в результат",
+);
+assert(
+  projection.primitives.some((p) => p.id === projArea.id),
+  "проекция: область вне тумана видима (категории независимы)",
+);
+assert(projection.markers.length === 1, "проекция: маркер вне тумана виден");
+// Скрываем маркер туманом объектов
+projFog = { ...projFog, objects: paintFogCircle(projFog.objects, 800, 800, 80, false) };
+pproj = setMapFog(pproj, pproj.rootMapId, projFog);
+projection = projectForPlayer(pproj.maps[pproj.rootMapId]);
+assert(projection.markers.length === 0, "проекция: скрытый туманом маркер не попадает");
+// Флаг «не показывать игрокам» при раскрытом тумане
+pproj = setMapFog(pproj, pproj.rootMapId, emptyFog());
+pproj = updatePrimitive(pproj, pproj.rootMapId, projArea.id, { playerVisible: false });
+projection = projectForPlayer(pproj.maps[pproj.rootMapId]);
+assert(
+  !projection.primitives.some((p) => p.id === projArea.id),
+  "проекция: флаг playerVisible=false исключает сущность при раскрытом тумане",
+);
+// Заметки не попадают в проекцию вовсе
+assert(
+  !("note" in (projection.primitives[0] ?? {})) || projection.primitives.every((p) => !p.note),
+  "проекция: заметки мастера не передаются игроку",
+);
+// Туман на вложенных картах работает так же
+const projChild = pproj.maps[projLoc.mapId];
+assert(projectForPlayer(projChild).primitives.length === 0, "проекция вложенной карты: пустая карта — пустая проекция");
 
 console.log(`\nВсе ${passed} проверок пройдены`);

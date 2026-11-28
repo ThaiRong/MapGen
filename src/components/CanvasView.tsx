@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import { legendTypeById, primitiveCenter } from "../core/project";
+import { FOG_TILE_SIZE, maskHidesTile, tileKey, tileOf } from "../core/fog";
 import type { MapView, Primitive, Vec2 } from "../core/types";
 import { useAppStore } from "../state/store";
+import FogControls from "./FogControls";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 20;
@@ -62,6 +64,13 @@ type DragState =
       startY: number;
       curX: number;
       curY: number;
+    }
+  | {
+      mode: "fogstroke";
+      pointerId: number;
+      lastX: number;
+      lastY: number;
+      moved: boolean;
     }
   | {
       mode: "rotate";
@@ -184,6 +193,9 @@ export default function CanvasView() {
   const labelDraft = useAppStore((s) => s.labelDraft);
   const generationPreview = useAppStore((s) => s.generationPreview);
   const generationBoundsRect = useAppStore((s) => s.generationBoundsRect);
+  const fogDraft = useAppStore((s) => s.fogDraft);
+  const fogOverlayVisible = useAppStore((s) => s.fogOverlayVisible);
+  const fogRadius = useAppStore((s) => s.fogRadius);
   const tool = useAppStore((s) => s.tool);
   const project = useAppStore((s) => s.project);
 
@@ -514,6 +526,42 @@ export default function CanvasView() {
         ctx.fillText(e.label, s.x, s.y - MARKER_RADIUS - 6);
       }
 
+      // --- Туман войны: оверлей мастера (деликатный, контекст виден) ---
+      const fog = state.fogDraft ?? map.fog;
+      if (fog && state.fogOverlayVisible) {
+        const minT = tileOf(view.centerX - w / 2 / view.zoom, view.centerY - h / 2 / view.zoom);
+        const maxT = tileOf(view.centerX + w / 2 / view.zoom, view.centerY + h / 2 / view.zoom);
+        const categories: { mask: (typeof fog)["landscape"]; rgb: string }[] = [
+          { mask: fog.landscape, rgb: "13, 14, 18" },
+          { mask: fog.topography, rgb: "26, 38, 56" },
+          { mask: fog.objects, rgb: "52, 26, 26" },
+        ];
+        const tileScreen = FOG_TILE_SIZE * view.zoom;
+        for (const { mask, rgb } of categories) {
+          ctx.fillStyle = `rgba(${rgb}, 0.42)`;
+          for (let ty = minT.ty; ty <= maxT.ty; ty += 1) {
+            for (let tx = minT.tx; tx <= maxT.tx; tx += 1) {
+              if (!maskHidesTile(mask, tileKey(tx, ty))) continue;
+              const s = toS({ x: tx * FOG_TILE_SIZE, y: ty * FOG_TILE_SIZE });
+              ctx.fillRect(s.x, s.y, tileScreen + 1, tileScreen + 1);
+            }
+          }
+        }
+      }
+
+      // --- Круг кисти тумана ---
+      if (state.tool === "fog" && cursorWorldRef.current) {
+        const c = toS(cursorWorldRef.current);
+        ctx.save();
+        ctx.strokeStyle = state.fogReveal ? "#7fc46b" : "#e05c5c";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, state.fogRadius * view.zoom, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // --- Предпросмотр черновика (линия/область/перо) ---
       const draft = state.drawingDraft;
       if (draft && draft.points.length > 0) {
@@ -693,7 +741,7 @@ export default function CanvasView() {
 
   useEffect(() => {
     draw();
-  }, [project, selectedEntityId, selectedPrimitiveIds, drawingDraft, generationPreview, generationBoundsRect, tool, draw]);
+  }, [project, selectedEntityId, selectedPrimitiveIds, drawingDraft, generationPreview, generationBoundsRect, fogDraft, fogOverlayVisible, fogRadius, tool, draw]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -813,6 +861,26 @@ export default function CanvasView() {
           } else {
             state.clearSelection();
           }
+          return;
+        }
+        case "fog": {
+          const reveal = e.altKey ? !state.fogReveal : state.fogReveal;
+          const hit = hitTest(world);
+          if (hit) {
+            // Семантическая операция: сущность целиком.
+            state.fogEntityAt(world.x, world.y, reveal);
+            return;
+          }
+          state.fogStrokeBegin();
+          state.fogStrokePaint(world.x, world.y);
+          dragRef.current = {
+            mode: "fogstroke",
+            pointerId: e.pointerId,
+            lastX: pos.x,
+            lastY: pos.y,
+            moved: false,
+          };
+          canvas.setPointerCapture(e.pointerId);
           return;
         }
         case "select":
@@ -937,7 +1005,7 @@ export default function CanvasView() {
             rafPending.current = false;
             useAppStore.getState().setCursor({ x: world.x, y: world.y });
             const s = useAppStore.getState();
-            if (s.drawingDraft && s.drawingDraft.kind !== "pen") draw();
+            if ((s.drawingDraft && s.drawingDraft.kind !== "pen") || s.tool === "fog") draw();
           });
         }
         return;
@@ -955,6 +1023,10 @@ export default function CanvasView() {
         schedulePersistView();
       } else if (drag.mode === "pen") {
         useAppStore.getState().penAddPoint(world.x, world.y);
+        drag.moved = true;
+        draw();
+      } else if (drag.mode === "fogstroke") {
+        useAppStore.getState().fogStrokePaint(world.x, world.y);
         drag.moved = true;
         draw();
       } else if (drag.mode === "marker") {
@@ -1014,6 +1086,9 @@ export default function CanvasView() {
       }
       if (drag.mode === "pen") {
         state.finishDrawing();
+      }
+      if (drag.mode === "fogstroke") {
+        state.fogStrokeEnd();
       }
       if (drag.mode === "genbounds") {
         const x1 = Math.min(drag.startX, pos.x);
@@ -1177,6 +1252,7 @@ export default function CanvasView() {
     <div ref={wrapRef} className={wrapperClass}>
       <canvas ref={canvasRef} />
       {labelDraft && <LabelDraftInput x={labelDraft.x} y={labelDraft.y} worldToScreen={worldToScreen} />}
+      {tool === "fog" && <FogControls />}
     </div>
   );
 }

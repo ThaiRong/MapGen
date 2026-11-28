@@ -957,6 +957,71 @@ input[type="checkbox"] {
   gap: 6px;
 }
 
+/* Панель кисти тумана */
+.fog-controls {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  z-index: 30;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.fog-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.fog-controls .field {
+  margin-bottom: 8px;
+}
+
+.fog-controls .field label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.fog-controls .row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.fog-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.fog-overlay-toggle {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.fog-mass {
+  flex-wrap: wrap;
+}
+
+.fog-controls .hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
 /* Status bar */
 .status-bar {
   display: flex;
